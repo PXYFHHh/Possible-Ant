@@ -145,6 +145,90 @@ def delete_file(filename: str) -> str:
 
 
 @tool
+def delete_multiple_files(filenames: str, exclude: Optional[str] = None) -> str:
+    """
+    批量删除 files 文件夹中的多个文件
+    
+    params:
+        filenames: 要删除的文件名列表，用逗号分隔（如："file1.txt,file2.txt,file3.png"）
+                  如果为空字符串，则删除所有文件（除了exclude中指定的文件）
+        exclude: 要保留的文件名列表，用逗号分隔（如："README.md,important.txt"）
+    
+    return:
+        批量删除结果统计
+    
+    示例:
+        # 删除指定文件
+        delete_multiple_files("file1.txt,file2.txt,file3.png")
+        
+        # 删除所有文件，但保留README.md
+        delete_multiple_files("", "README.md")
+        
+        # 删除多个文件，但保留某些重要文件
+        delete_multiple_files("data1.txt,data2.txt", "README.md,config.json")
+    """
+    try:
+        _ensure_files_dir()
+        
+        exclude_list = []
+        if exclude:
+            exclude_list = [name.strip() for name in exclude.split(',') if name.strip()]
+        
+        files_to_delete = []
+        
+        if filenames and filenames.strip():
+            files_to_delete = [name.strip() for name in filenames.split(',') if name.strip()]
+        else:
+            all_files = list(FILES_DIR.glob("*"))
+            files_to_delete = [f.name for f in all_files if f.is_file() and f.name not in exclude_list]
+        
+        if not files_to_delete:
+            return "没有需要删除的文件"
+        
+        success_count = 0
+        failed_count = 0
+        total_size = 0
+        failed_files = []
+        
+        for filename in files_to_delete:
+            if filename in exclude_list:
+                continue
+            
+            try:
+                file_path = _validate_path(filename)
+                
+                if file_path.exists():
+                    file_size = file_path.stat().st_size
+                    file_path.unlink()
+                    success_count += 1
+                    total_size += file_size
+                else:
+                    failed_count += 1
+                    failed_files.append(f"{filename} (不存在)")
+            except Exception as e:
+                failed_count += 1
+                failed_files.append(f"{filename} ({str(e)})")
+        
+        result = f"批量删除完成\n"
+        result += f"✅ 成功删除：{success_count} 个文件\n"
+        result += f"💾 释放空间：{total_size} 字节 ({total_size/1024:.2f} KB)\n"
+        
+        if exclude_list:
+            result += f"🔒 保留文件：{', '.join(exclude_list)}\n"
+        
+        if failed_count > 0:
+            result += f"❌ 失败：{failed_count} 个文件\n"
+            result += f"失败详情：\n"
+            for failed in failed_files:
+                result += f"  - {failed}\n"
+        
+        return result
+    
+    except Exception as e:
+        return f"批量删除失败：{str(e)}"
+
+
+@tool
 def list_files() -> str:
     """
     列出 files 文件夹中的所有文件

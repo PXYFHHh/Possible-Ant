@@ -1,2 +1,6 @@
 .env
 __pycache__/
+
+# files 文件夹：忽略所有文件，但保留 README.md
+files/*
+!files/README.md
