@@ -23,7 +23,11 @@ from src.core.tools import (
     get_productivity_summary,
     get_screen_time_today,
     get_screen_time_by_date,
-    get_productivity_with_screen_time
+    get_productivity_with_screen_time,
+    rag_ingest_document,
+    rag_query,
+    rag_list_documents,
+    rag_delete_document,
 )
 
 if __name__ == "__main__":
@@ -52,7 +56,11 @@ if __name__ == "__main__":
         get_productivity_summary,
         get_screen_time_today,
         get_screen_time_by_date,
-        get_productivity_with_screen_time
+        get_productivity_with_screen_time,
+        rag_ingest_document,
+        rag_query,
+        rag_list_documents,
+        rag_delete_document,
     ])
     
     print("=" * 70)
@@ -65,6 +73,7 @@ if __name__ == "__main__":
     print("  🧮  数学计算")
     print("  📊  图表绘制（折线图、柱状图、饼图、散点图、直方图）")
     print("  📈  ManicTime追踪（活动记录、应用使用统计、生产力分析、屏幕活跃时间）\n")
+    print("  📚  RAG知识库（文档入库、混合检索、重排召回）\n")
     print("  输入 'exit' 或 'quit' 退出程序")
     print("=" * 70)
     

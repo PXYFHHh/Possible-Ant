@@ -15,7 +15,13 @@ from src.core.tools import (
     list_files,
     calculate,
     calculate_percentage,
-    calculate_average
+    calculate_average,
+    get_deepseek_balance,
+    get_deepseek_usage,
+    rag_ingest_document,
+    rag_query,
+    rag_list_documents,
+    rag_delete_document,
 )
 
 load_dotenv()
@@ -382,7 +388,13 @@ if __name__ == "__main__":
         list_files,
         calculate,
         calculate_percentage,
-        calculate_average
+        calculate_average,
+        get_deepseek_balance,
+        get_deepseek_usage,
+        rag_ingest_document,
+        rag_query,
+        rag_list_documents,
+        rag_delete_document,
     ])
     
     print("多轮对话已启动（输入 'exit' 退出，'clear' 清空记忆，'status' 查看记忆状态）\n")

@@ -2,6 +2,7 @@ import streamlit as st
 import sys
 import os
 import json
+from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,7 +31,13 @@ from src.core.tools import (
     get_productivity_summary,
     get_screen_time_today,
     get_screen_time_by_date,
-    get_productivity_with_screen_time
+    get_productivity_with_screen_time,
+    get_deepseek_balance,
+    get_deepseek_usage,
+    rag_ingest_document,
+    rag_query,
+    rag_list_documents,
+    rag_delete_document,
 )
 
 ALL_TOOLS = [
@@ -58,7 +65,16 @@ ALL_TOOLS = [
     get_screen_time_today,
     get_screen_time_by_date,
     get_productivity_with_screen_time,
+    get_deepseek_balance,
+    get_deepseek_usage,
+    rag_ingest_document,
+    rag_query,
+    rag_list_documents,
+    rag_delete_document,
 ]
+
+BASE_DIR = Path(__file__).resolve().parent
+FILES_DIR = BASE_DIR / "files"
 
 st.set_page_config(
     page_title="AI 智能助手",
@@ -128,21 +144,38 @@ def render_sidebar():
         st.metric("LLM 调用次数", st.session_state.total_llm_calls)
         
         st.markdown("---")
-        
-        st.subheader("🛠️ 可用工具")
-        tool_categories = {
-            "⏰ 时间": ["get_current_time"],
-            "🔍 搜索": ["get_search_results"],
-            "📁 文件": ["create_file", "read_file", "list_files", "delete_file", "delete_multiple_files"],
-            "🧮 计算": ["calculate", "calculate_percentage", "calculate_average"],
-            "📊 图表": ["plot_line_chart", "plot_bar_chart", "plot_pie_chart", "plot_scatter_chart", "plot_histogram", "plot_multi_line_chart"],
-            "📈 ManicTime": ["get_manictime_schema", "get_today_activities", "get_activities_by_date_range", "get_application_usage", "get_productivity_summary", "get_screen_time_today", "get_screen_time_by_date", "get_productivity_with_screen_time"],
-        }
-        for category, tools in tool_categories.items():
-            with st.expander(category, expanded=False):
-                for tool in tools:
-                    st.text(f"• {tool}")
-        
+
+        st.subheader("📚 知识库")
+        FILES_DIR.mkdir(parents=True, exist_ok=True)
+        uploaded_file = st.file_uploader(
+            "上传文档并入库",
+            type=["txt", "md", "pdf", "docx"],
+            accept_multiple_files=False,
+            key="rag_upload_file",
+        )
+
+        if uploaded_file is not None:
+            save_name = os.path.basename(uploaded_file.name)
+            save_path = FILES_DIR / save_name
+
+            if st.button("📥 上传并入库", use_container_width=True):
+                try:
+                    save_path.write_bytes(uploaded_file.getbuffer())
+                    ingest_result = rag_ingest_document.invoke({"filename": save_name})
+                    if ingest_result.startswith("✅"):
+                        st.success(ingest_result)
+                    else:
+                        st.error(ingest_result)
+                except Exception as exc:
+                    st.error(f"上传失败: {exc}")
+
+        if st.button("🔄 刷新知识库", use_container_width=True):
+            st.rerun()
+
+        kb_text = rag_list_documents.invoke({})
+        with st.expander("已入库文档", expanded=False):
+            st.text(kb_text)
+
         st.markdown("---")
         
         col_clear, col_new = st.columns(2)
