@@ -143,6 +143,21 @@ def api_chat_reset():
     return jsonify({"ok": True, "message": "会话已重置"})
 
 
+@app.post("/api/chat/sync")
+def api_chat_sync():
+    if _generation_lock.locked():
+        return jsonify({"ok": False, "message": "当前正在生成，请先停止生成"}), 409
+
+    body = request.get_json(silent=True) or {}
+    messages = body.get("messages", [])
+    if not isinstance(messages, list):
+        return jsonify({"ok": False, "message": "messages 必须是数组"}), 400
+
+    agent = get_agent()
+    agent.sync_memory_from_conversation(messages)
+    return jsonify({"ok": True, "memory": agent.get_memory_status()})
+
+
 @app.post("/api/chat/stream")
 def api_chat_stream():
     body = request.get_json(silent=True) or {}

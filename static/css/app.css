@@ -117,6 +117,113 @@ body {
   color: var(--muted);
 }
 
+.conversation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.conversation-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fbfaf6;
+  padding: 0.45rem 0.55rem;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.45rem;
+  transition: 0.18s ease;
+}
+
+.conversation-item:hover {
+  border-color: #b8c9c7;
+  background: #f5f8f7;
+}
+
+.conversation-item.active {
+  border-color: #6ca7a3;
+  background: #edf7f6;
+}
+
+.conversation-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.conversation-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-meta {
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.conversation-actions {
+  position: relative;
+}
+
+.conversation-actions summary {
+  list-style: none;
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 8px;
+  border: 1px solid #ced6d3;
+  background: #f3f6f5;
+  color: #51626d;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.conversation-actions summary::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-actions[open] summary {
+  background: #e6efee;
+}
+
+.conversation-menu {
+  position: absolute;
+  right: 0;
+  top: 1.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 0.35rem;
+  min-width: 74px;
+  box-shadow: var(--shadow);
+  z-index: 5;
+}
+
+.conversation-delete-btn {
+  width: 100%;
+  border: 1px solid #dcb8b2;
+  border-radius: 6px;
+  background: #fbefed;
+  color: #9a3a2c;
+  padding: 0.28rem 0.42rem;
+  font-size: 0.82rem;
+}
+
+.conversation-delete-btn:hover {
+  background: #f7e0dc;
+}
+
 .chat-panel {
   min-height: calc(100vh - 88px);
   border: 1px solid var(--line);

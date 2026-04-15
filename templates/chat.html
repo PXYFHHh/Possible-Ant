@@ -18,13 +18,21 @@
   <main class="layout">
     <aside class="sidebar">
       <section class="panel">
+        <div class="panel-header">
+          <h2>历史对话</h2>
+          <button id="newConversationButton" class="secondary-btn" type="button">新建</button>
+        </div>
+        <ul id="conversationList" class="conversation-list"></ul>
+        <div id="conversationEmpty" class="empty-tip">暂无历史对话</div>
+      </section>
+
+      <section class="panel">
         <h2>会话状态</h2>
         <div class="stat-list">
           <div class="stat-item"><span>记忆消息</span><strong id="memoryCount">-</strong></div>
           <div class="stat-item"><span>可用额度</span><strong id="memoryRemain">-</strong></div>
           <div class="stat-item"><span>系统状态</span><strong id="busyState">空闲</strong></div>
         </div>
-        <button id="resetChatButton" class="secondary-btn">新对话</button>
       </section>
 
       <section class="panel muted">

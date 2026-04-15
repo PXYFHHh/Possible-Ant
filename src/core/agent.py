@@ -69,6 +69,61 @@ class Agent:
     def clear_memory(self):
         self.memory = [SystemMessage(content=self.system_prompt)]
         print("记忆已清空")
+
+    def sync_memory_from_conversation(self, messages: list):
+        """
+        按前端传入的会话消息重建内存。
+        仅保留 user/assistant 文本语义上下文，不回放工具调用细节。
+        """
+        self.memory = [SystemMessage(content=self.system_prompt)]
+
+        if not isinstance(messages, list):
+            return
+
+        def _assistant_to_text(msg: dict) -> str:
+            if not isinstance(msg, dict):
+                return ""
+
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+
+            segs = msg.get("segments")
+            if not isinstance(segs, list):
+                return ""
+
+            parts = []
+            for seg in segs:
+                if not isinstance(seg, dict):
+                    continue
+                if seg.get("type") == "text":
+                    text = str(seg.get("content", "")).strip()
+                    if text:
+                        parts.append(text)
+                elif seg.get("type") == "tool_call":
+                    name = str(seg.get("name", "tool")).strip()
+                    result = str(seg.get("result", "")).strip()
+                    if result:
+                        parts.append(f"[工具 {name} 返回]\n{result}")
+
+            return "\n\n".join(parts).strip()
+
+        max_rebuild = max(1, self.max_memory - 1)
+        for msg in messages[-max_rebuild:]:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+
+            if role == "user":
+                text = str(msg.get("content", "")).strip()
+                if text:
+                    self.memory.append(HumanMessage(content=text))
+            elif role == "assistant":
+                text = _assistant_to_text(msg)
+                if text:
+                    self.memory.append(AIMessage(content=text))
+
+        self._trim_memory()
     
     def get_memory_count(self) -> int:
         return len(self.memory) - 1
