@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 助手 - 聊天</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="page-chat">
+  <header class="topbar">
+    <div class="brand">Agent Console</div>
+    <nav class="topnav">
+      <a class="nav-link active" href="/">聊天</a>
+      <a class="nav-link" href="/knowledge">知识库</a>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>会话状态</h2>
+        <div class="stat-list">
+          <div class="stat-item"><span>记忆消息</span><strong id="memoryCount">-</strong></div>
+          <div class="stat-item"><span>可用额度</span><strong id="memoryRemain">-</strong></div>
+          <div class="stat-item"><span>系统状态</span><strong id="busyState">空闲</strong></div>
+        </div>
+        <button id="resetChatButton" class="secondary-btn">新对话</button>
+      </section>
+
+      <section class="panel muted">
+        <h3>使用提示</h3>
+        <p>发送后按钮会变为“停止”，点击即可中断当前输出并立即继续下一轮提问。</p>
+      </section>
+    </aside>
+
+    <section class="chat-panel">
+      <div id="messages" class="messages"></div>
+
+      <div class="composer">
+        <textarea id="messageInput" rows="1" placeholder="输入问题，按 Enter 发送，Shift+Enter 换行"></textarea>
+        <button id="sendStopButton" class="primary-btn" type="button">发送</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+</body>
+</html>

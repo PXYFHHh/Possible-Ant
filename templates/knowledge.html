@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 助手 - 知识库</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body class="page-kb">
+  <header class="topbar">
+    <div class="brand">Agent Console</div>
+    <nav class="topnav">
+      <a class="nav-link" href="/">聊天</a>
+      <a class="nav-link active" href="/knowledge">知识库</a>
+    </nav>
+  </header>
+
+  <main class="kb-layout">
+    <section class="panel">
+      <h2>文档入库</h2>
+      <p class="subtext">支持 txt / md / pdf / docx。上传后自动切片并写入知识库。</p>
+      <form id="uploadForm" class="upload-row">
+        <input id="uploadInput" type="file" accept=".txt,.md,.markdown,.pdf,.docx">
+        <button id="uploadButton" class="primary-btn" type="submit">上传并入库</button>
+      </form>
+      <div id="uploadResult" class="result-box"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>已入库文档</h2>
+        <button id="refreshDocsButton" class="secondary-btn" type="button">刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>文档名</th>
+              <th>Chunks</th>
+              <th>更新时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="docsTableBody"></tbody>
+        </table>
+      </div>
+      <div id="docsEmpty" class="empty-tip">暂无文档</div>
+    </section>
+
+    <section class="panel muted">
+      <div class="panel-header">
+        <h2>RAG 健康状态</h2>
+        <button id="refreshHealthButton" class="secondary-btn" type="button">刷新</button>
+      </div>
+      <pre id="healthOutput" class="health-box">加载中...</pre>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/knowledge.js') }}"></script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage, SystemMessage
 from typing import List, Callable
@@ -37,13 +37,14 @@ class Model:
             if not all([self.model_name, self.api_key, self.base_url]):
                 raise ValueError("缺少必要的环境变量")
             
-            self.llm = init_chat_model(
+            self.llm = ChatOpenAI(
                 model=self.model_name,
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=60,
                 stream_usage=True
             )
+            print(f"使用模型: {self.model_name}")
         except KeyError as e:
             raise ValueError(f"缺少必要的环境变量: {e}")
 

@@ -8,3 +8,9 @@ src/rag/chroma_db/*
 src/rag/model_cache/*
 src/test/*
 src/rag/rag_metadata.json
+src/rag/bm25_state.json
+*.log
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-lock
