@@ -598,7 +598,7 @@ function isRagTextResult(text) {
 
 function parseRagText(rawText) {
   var lines = rawText.split("\n");
-  var meta = { query: "", count: "", strategy: "", timing: "" };
+  var meta = { query: "", count: "", strategy: "", timing: "", rewriteSummary: "", rewriteVariants: [] };
   var chunks = [];
   var inChunks = false;
   var currentChunk = null;
@@ -608,6 +608,8 @@ function parseRagText(rawText) {
     if (!inChunks) {
       if (/^最终查询\s*:/.test(line)) meta.query = line.replace(/^最终查询\s*:\s*/, "");
       else if (/^命中数量\s*:/.test(line)) meta.count = line.replace(/^命中数量\s*:\s*/, "");
+      else if (/^自动改写检索\s*:/.test(line)) meta.rewriteSummary = line.replace(/^自动改写检索\s*:\s*/, "");
+      else if (/^-\s*第\d+路\s*\|/.test(line)) meta.rewriteVariants.push(line.replace(/^\s*-\s*/, ""));
       else if (/^检索策略\s*:/.test(line)) meta.strategy = line.replace(/^检索策略\s*:\s*/, "");
       else if (/^检索耗时\s*:/.test(line)) meta.timing = line.replace(/^检索耗时\s*:\s*/, "");
     } else {
@@ -637,6 +639,32 @@ function renderRagQueryResult(container, rawText) {
   if (parsed.meta.query) { var m = document.createElement("span"); m.className = "rag-meta-item"; m.textContent = "\u6700\u7EC8\u67E5\u8BE2: " + parsed.meta.query; metaEl.appendChild(m); }
   if (parsed.meta.count) { var c = document.createElement("span"); c.className = "rag-meta-item"; c.textContent = "\u547D\u4E2D\u6570\u91CF: " + parsed.meta.count; metaEl.appendChild(c); }
   container.appendChild(metaEl);
+
+  if (parsed.meta.rewriteSummary || (parsed.meta.rewriteVariants && parsed.meta.rewriteVariants.length)) {
+    var rewriteEl = document.createElement("div");
+    rewriteEl.className = "rag-rewrite-block";
+
+    if (parsed.meta.rewriteSummary) {
+      var rewriteTitle = document.createElement("div");
+      rewriteTitle.className = "rag-rewrite-title";
+      rewriteTitle.textContent = "\u81EA\u52A8\u6539\u5199\u68C0\u7D22: " + parsed.meta.rewriteSummary;
+      rewriteEl.appendChild(rewriteTitle);
+    }
+
+    if (parsed.meta.rewriteVariants && parsed.meta.rewriteVariants.length) {
+      var rewriteList = document.createElement("div");
+      rewriteList.className = "rag-rewrite-list";
+      parsed.meta.rewriteVariants.forEach(function(item) {
+        var variantEl = document.createElement("div");
+        variantEl.className = "rag-rewrite-item";
+        variantEl.textContent = item;
+        rewriteList.appendChild(variantEl);
+      });
+      rewriteEl.appendChild(rewriteList);
+    }
+
+    container.appendChild(rewriteEl);
+  }
 
   if (parsed.meta.strategy) {
     var stratEl = document.createElement("div"); stratEl.className = "rag-timing"; stratEl.textContent = parsed.meta.strategy;

@@ -571,6 +571,38 @@ input, textarea, select { font-family: inherit; font-size: inherit; }
   border-top: 1px dashed var(--border-light);
 }
 
+.rag-rewrite-block {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #F8FAFC;
+  border: 1px solid #E2E8F0;
+  border-radius: var(--radius-sm);
+}
+
+.rag-rewrite-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.rag-rewrite-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.rag-rewrite-item {
+  padding: 8px 10px;
+  background: #FFFFFF;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  font-size: 0.71875rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
 .rag-empty {
   padding: 16px;
   text-align: center;

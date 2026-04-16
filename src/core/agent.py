@@ -4,6 +4,7 @@ from langchain_core.messages import HumanMessage, ToolMessage, AIMessage, System
 from typing import List, Callable
 import os
 import sys
+import uuid
 sys.path.append(".")
 from src.core.tools import (
     get_current_time, 
@@ -23,6 +24,8 @@ from src.core.tools import (
     rag_list_documents,
     rag_delete_document,
 )
+from src.core.tools.rag_tools import start_rag_session, end_rag_session
+from src.core.session_logger import start_session, end_session
 
 load_dotenv()
 
@@ -50,10 +53,11 @@ class Model:
 
 
 class Agent:
-    def __init__(self, model: Model, tools: List[Callable], max_memory: int = 50):
+    def __init__(self, model: Model, tools: List[Callable], max_memory: int = 50, max_iterations: int = 10):
         self.model = model
         self.tools_list = tools
         self.max_memory = max_memory
+        self.max_iterations = max_iterations
         
         with open("src/core/prompts/React_prompt.md", "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
@@ -192,249 +196,399 @@ class Agent:
         self.memory.append(HumanMessage(content=user_input))
         self._trim_memory()
         
-        ai_msg = self.llm_with_tools.invoke(self.memory)
-        self.memory.append(ai_msg)
+        rag_session_id = str(uuid.uuid4())
+        start_rag_session(rag_session_id)
         
-        while ai_msg.tool_calls:
-            for tool_call in ai_msg.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_id = tool_call["id"]
-                
-                print(f"调用工具: {tool_name}({tool_args})")
-                
-                tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
-                if tool_func:
-                    tool_result = tool_func.invoke(tool_args)
-                    result_content = tool_result.content if hasattr(tool_result, 'content') else str(tool_result)
-                    print(f"工具返回: {result_content}\n")
-                    tool_message = ToolMessage(
-                        content=result_content,
-                        tool_call_id=tool_id
-                    )
-                    self.memory.append(tool_message)
-            
+        log_session_id = str(uuid.uuid4())
+        logger = start_session(log_session_id)
+        logger.log_user_input(user_input)
+        
+        total_input_tokens = 0
+        total_output_tokens = 0
+        llm_calls = 0
+        is_estimated = False
+        
+        try:
             ai_msg = self.llm_with_tools.invoke(self.memory)
             self.memory.append(ai_msg)
-            self._trim_memory()
-        
-        return ai_msg.content
+            
+            token_usage = self._extract_token_usage(ai_msg)
+            total_input_tokens += token_usage["input_tokens"]
+            total_output_tokens += token_usage["output_tokens"]
+            llm_calls += 1
+            logger.log_llm_call(
+                call_index=llm_calls,
+                input_tokens=token_usage["input_tokens"],
+                output_tokens=token_usage["output_tokens"],
+                estimated=False,
+                content_preview=ai_msg.content or ""
+            )
+            
+            while ai_msg.tool_calls:
+                for tool_call in ai_msg.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_id = tool_call["id"]
+                    
+                    print(f"调用工具: {tool_name}({tool_args})")
+                    
+                    logger.log_tool_call(
+                        call_index=llm_calls,
+                        tool_name=tool_name,
+                        tool_args=tool_args
+                    )
+                    
+                    tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
+                    if tool_func:
+                        tool_result = tool_func.invoke(tool_args)
+                        result_content = tool_result.content if hasattr(tool_result, 'content') else str(tool_result)
+                        print(f"工具返回: {result_content}\n")
+                        
+                        logger.log_tool_result(
+                            tool_name=tool_name,
+                            result_length=len(result_content),
+                            result_preview=result_content
+                        )
+                        
+                        tool_message = ToolMessage(
+                            content=result_content,
+                            tool_call_id=tool_id
+                        )
+                        self.memory.append(tool_message)
+                
+                ai_msg = self.llm_with_tools.invoke(self.memory)
+                self.memory.append(ai_msg)
+                self._trim_memory()
+                
+                token_usage = self._extract_token_usage(ai_msg)
+                total_input_tokens += token_usage["input_tokens"]
+                total_output_tokens += token_usage["output_tokens"]
+                llm_calls += 1
+                logger.log_llm_call(
+                    call_index=llm_calls,
+                    input_tokens=token_usage["input_tokens"],
+                    output_tokens=token_usage["output_tokens"],
+                    estimated=False,
+                    content_preview=ai_msg.content or ""
+                )
+            
+            if total_input_tokens == 0 and total_output_tokens == 0:
+                is_estimated = True
+                input_text = self._messages_to_text(self.memory)
+                total_input_tokens = self._estimate_tokens(input_text)
+                total_output_tokens = self._estimate_tokens(ai_msg.content or "")
+            
+            logger.log_session_end(
+                total_llm_calls=llm_calls,
+                total_input=total_input_tokens,
+                total_output=total_output_tokens,
+                estimated=is_estimated
+            )
+            
+            return ai_msg.content
+        finally:
+            end_rag_session(rag_session_id)
+            end_session(log_session_id)
 
     def React_Agent_Stream(self, user_input: str):
         self.memory.append(HumanMessage(content=user_input))
         self._trim_memory()
         
+        rag_session_id = str(uuid.uuid4())
+        start_rag_session(rag_session_id)
+        
+        log_session_id = str(uuid.uuid4())
+        logger = start_session(log_session_id)
+        logger.log_user_input(user_input)
+        
         total_input_tokens = 0
         total_output_tokens = 0
         llm_calls = 0
         all_output_text = ""
         is_estimated = False
+        iteration_count = 0
         
-        while True:
-            full_content = ""
-            tool_calls_chunks = []
-            last_chunk = None
-            usage_chunk = None
-            
-            for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
-                if chunk.content:
-                    print(chunk.content, end="", flush=True)
-                    full_content += chunk.content
+        try:
+            while True:
+                iteration_count += 1
+                if iteration_count > self.max_iterations:
+                    print(f"\n[达到最大迭代次数 {self.max_iterations}，停止工具调用]")
+                    break
                 
-                if hasattr(chunk, 'tool_call_chunks') and chunk.tool_call_chunks:
-                    tool_calls_chunks.append(chunk)
+                full_content = ""
+                tool_calls_chunks = []
+                last_chunk = None
+                usage_chunk = None
                 
-                chunk_usage = self._extract_token_usage(chunk)
-                if chunk_usage["input_tokens"] > 0 or chunk_usage["output_tokens"] > 0:
-                    usage_chunk = chunk_usage
+                for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
+                    if chunk.content:
+                        print(chunk.content, end="", flush=True)
+                        full_content += chunk.content
+                    
+                    if hasattr(chunk, 'tool_call_chunks') and chunk.tool_call_chunks:
+                        tool_calls_chunks.append(chunk)
+                    
+                    chunk_usage = self._extract_token_usage(chunk)
+                    if chunk_usage["input_tokens"] > 0 or chunk_usage["output_tokens"] > 0:
+                        usage_chunk = chunk_usage
+                    
+                    last_chunk = chunk
                 
-                last_chunk = chunk
-            
-            print()
-            
-            if usage_chunk:
-                total_input_tokens += usage_chunk["input_tokens"]
-                total_output_tokens += usage_chunk["output_tokens"]
-            elif last_chunk is not None:
-                token_usage = self._extract_token_usage(last_chunk)
-                total_input_tokens += token_usage["input_tokens"]
-                total_output_tokens += token_usage["output_tokens"]
-            
-            llm_calls += 1
-            all_output_text += full_content
-            
-            if tool_calls_chunks:
-                from langchain_core.messages import AIMessageChunk
-                ai_msg = AIMessageChunk(content=full_content)
+                print()
                 
-                tool_calls_dict = {}
-                for chunk in tool_calls_chunks:
-                    for tc_chunk in chunk.tool_call_chunks:
-                        idx = tc_chunk.get('index', 0)
-                        if idx not in tool_calls_dict:
-                            tool_calls_dict[idx] = {
-                                'id': tc_chunk.get('id', ''),
-                                'name': tc_chunk.get('name', ''),
-                                'args': ''
-                            }
-                        if tc_chunk.get('args'):
-                            tool_calls_dict[idx]['args'] += tc_chunk['args']
+                if usage_chunk:
+                    total_input_tokens += usage_chunk["input_tokens"]
+                    total_output_tokens += usage_chunk["output_tokens"]
+                elif last_chunk is not None:
+                    token_usage = self._extract_token_usage(last_chunk)
+                    total_input_tokens += token_usage["input_tokens"]
+                    total_output_tokens += token_usage["output_tokens"]
                 
-                ai_msg.tool_calls = [
-                    {
-                        'id': tc['id'],
-                        'name': tc['name'],
-                        'args': eval(tc['args'].replace('true', 'True').replace('false', 'False').replace('null', 'None')) if tc['args'] else {}
-                    }
-                    for tc in tool_calls_dict.values()
-                ]
-            else:
-                ai_msg = AIMessage(content=full_content)
-            
-            self.memory.append(ai_msg)
-            self._trim_memory()
-            
-            if not ai_msg.tool_calls:
-                break
-            
-            for tool_call in ai_msg.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_id = tool_call["id"]
+                llm_calls += 1
+                all_output_text += full_content
                 
-                print(f"\n调用工具: {tool_name}({tool_args})")
+                logger.log_llm_call(
+                    call_index=llm_calls,
+                    input_tokens=usage_chunk["input_tokens"] if usage_chunk else (token_usage["input_tokens"] if last_chunk else 0),
+                    output_tokens=usage_chunk["output_tokens"] if usage_chunk else (token_usage["output_tokens"] if last_chunk else 0),
+                    estimated=False,
+                    content_preview=full_content
+                )
                 
-                tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
-                if tool_func:
-                    tool_result = tool_func.invoke(tool_args)
-                    result_content = tool_result.content if hasattr(tool_result, 'content') else str(tool_result)
-                    print(f"工具返回: {result_content}\n")
-                    tool_message = ToolMessage(
-                        content=result_content,
-                        tool_call_id=tool_id
+                if tool_calls_chunks:
+                    from langchain_core.messages import AIMessageChunk
+                    ai_msg = AIMessageChunk(content=full_content)
+                    
+                    tool_calls_dict = {}
+                    for chunk in tool_calls_chunks:
+                        for tc_chunk in chunk.tool_call_chunks:
+                            idx = tc_chunk.get('index', 0)
+                            if idx not in tool_calls_dict:
+                                tool_calls_dict[idx] = {
+                                    'id': tc_chunk.get('id', ''),
+                                    'name': tc_chunk.get('name', ''),
+                                    'args': ''
+                                }
+                            if tc_chunk.get('args'):
+                                tool_calls_dict[idx]['args'] += tc_chunk['args']
+                    
+                    ai_msg.tool_calls = [
+                        {
+                            'id': tc['id'],
+                            'name': tc['name'],
+                            'args': eval(tc['args'].replace('true', 'True').replace('false', 'False').replace('null', 'None')) if tc['args'] else {}
+                        }
+                        for tc in tool_calls_dict.values()
+                    ]
+                else:
+                    ai_msg = AIMessage(content=full_content)
+                
+                self.memory.append(ai_msg)
+                self._trim_memory()
+                
+                if not ai_msg.tool_calls:
+                    break
+                
+                for tool_call in ai_msg.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_id = tool_call["id"]
+                    
+                    print(f"\n调用工具: {tool_name}({tool_args})")
+                    
+                    logger.log_tool_call(
+                        call_index=llm_calls,
+                        tool_name=tool_name,
+                        tool_args=tool_args
                     )
-                    self.memory.append(tool_message)
-        
-        if total_input_tokens == 0 and total_output_tokens == 0:
-            is_estimated = True
-            input_text = self._messages_to_text(self.memory)
-            total_input_tokens = self._estimate_tokens(input_text)
-            total_output_tokens = self._estimate_tokens(all_output_text)
-        
-        print(self._format_token_info(total_input_tokens, total_output_tokens, llm_calls, is_estimated))
-        
-        return ai_msg.content
+                    
+                    tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
+                    if tool_func:
+                        tool_result = tool_func.invoke(tool_args)
+                        result_content = tool_result.content if hasattr(tool_result, 'content') else str(tool_result)
+                        print(f"工具返回: {result_content}\n")
+                        
+                        logger.log_tool_result(
+                            tool_name=tool_name,
+                            result_length=len(result_content),
+                            result_preview=result_content
+                        )
+                        
+                        tool_message = ToolMessage(
+                            content=result_content,
+                            tool_call_id=tool_id
+                        )
+                        self.memory.append(tool_message)
+            
+            if total_input_tokens == 0 and total_output_tokens == 0:
+                is_estimated = True
+                input_text = self._messages_to_text(self.memory)
+                total_input_tokens = self._estimate_tokens(input_text)
+                total_output_tokens = self._estimate_tokens(all_output_text)
+            
+            logger.log_session_end(
+                total_llm_calls=llm_calls,
+                total_input=total_input_tokens,
+                total_output=total_output_tokens,
+                estimated=is_estimated
+            )
+            
+            print(self._format_token_info(total_input_tokens, total_output_tokens, llm_calls, is_estimated))
+            
+            return ai_msg.content
+        finally:
+            end_rag_session(rag_session_id)
+            end_session(log_session_id)
 
     def React_Agent_Stream_UI(self, user_input: str):
         self.memory.append(HumanMessage(content=user_input))
         self._trim_memory()
         
+        rag_session_id = str(uuid.uuid4())
+        start_rag_session(rag_session_id)
+        
+        log_session_id = str(uuid.uuid4())
+        logger = start_session(log_session_id)
+        logger.log_user_input(user_input)
+        
         total_input_tokens = 0
         total_output_tokens = 0
         llm_calls = 0
         all_output_text = ""
         is_estimated = False
         
-        while True:
-            full_content = ""
-            full_reasoning = ""
-            tool_calls_chunks = []
-            last_chunk = None
-            usage_chunk = None
-            
-            for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
-                if chunk.content:
-                    full_content += chunk.content
-                    yield ("content", chunk.content)
+        try:
+            while True:
+                full_content = ""
+                full_reasoning = ""
+                tool_calls_chunks = []
+                last_chunk = None
+                usage_chunk = None
                 
-                if hasattr(chunk, 'reasoning_content') and chunk.reasoning_content:
-                    full_reasoning += chunk.reasoning_content
-                    yield ("reasoning", chunk.reasoning_content)
+                for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
+                    if chunk.content:
+                        full_content += chunk.content
+                        yield ("content", chunk.content)
+                    
+                    if hasattr(chunk, 'reasoning_content') and chunk.reasoning_content:
+                        full_reasoning += chunk.reasoning_content
+                        yield ("reasoning", chunk.reasoning_content)
+                    
+                    if hasattr(chunk, 'tool_call_chunks') and chunk.tool_call_chunks:
+                        tool_calls_chunks.append(chunk)
+                    
+                    chunk_usage = self._extract_token_usage(chunk)
+                    if chunk_usage["input_tokens"] > 0 or chunk_usage["output_tokens"] > 0:
+                        usage_chunk = chunk_usage
+                    
+                    last_chunk = chunk
                 
-                if hasattr(chunk, 'tool_call_chunks') and chunk.tool_call_chunks:
-                    tool_calls_chunks.append(chunk)
+                if usage_chunk:
+                    total_input_tokens += usage_chunk["input_tokens"]
+                    total_output_tokens += usage_chunk["output_tokens"]
+                elif last_chunk is not None:
+                    token_usage = self._extract_token_usage(last_chunk)
+                    total_input_tokens += token_usage["input_tokens"]
+                    total_output_tokens += token_usage["output_tokens"]
                 
-                chunk_usage = self._extract_token_usage(chunk)
-                if chunk_usage["input_tokens"] > 0 or chunk_usage["output_tokens"] > 0:
-                    usage_chunk = chunk_usage
+                llm_calls += 1
+                all_output_text += full_content
                 
-                last_chunk = chunk
-            
-            if usage_chunk:
-                total_input_tokens += usage_chunk["input_tokens"]
-                total_output_tokens += usage_chunk["output_tokens"]
-            elif last_chunk is not None:
-                token_usage = self._extract_token_usage(last_chunk)
-                total_input_tokens += token_usage["input_tokens"]
-                total_output_tokens += token_usage["output_tokens"]
-            
-            llm_calls += 1
-            all_output_text += full_content
-            
-            if tool_calls_chunks:
-                from langchain_core.messages import AIMessageChunk
-                ai_msg = AIMessageChunk(content=full_content)
+                logger.log_llm_call(
+                    call_index=llm_calls,
+                    input_tokens=usage_chunk["input_tokens"] if usage_chunk else (token_usage["input_tokens"] if last_chunk else 0),
+                    output_tokens=usage_chunk["output_tokens"] if usage_chunk else (token_usage["output_tokens"] if last_chunk else 0),
+                    estimated=False,
+                    content_preview=full_content
+                )
                 
-                tool_calls_dict = {}
-                for chunk in tool_calls_chunks:
-                    for tc_chunk in chunk.tool_call_chunks:
-                        idx = tc_chunk.get('index', 0)
-                        if idx not in tool_calls_dict:
-                            tool_calls_dict[idx] = {
-                                'id': tc_chunk.get('id', ''),
-                                'name': tc_chunk.get('name', ''),
-                                'args': ''
-                            }
-                        if tc_chunk.get('args'):
-                            tool_calls_dict[idx]['args'] += tc_chunk['args']
+                if tool_calls_chunks:
+                    from langchain_core.messages import AIMessageChunk
+                    ai_msg = AIMessageChunk(content=full_content)
+                    
+                    tool_calls_dict = {}
+                    for chunk in tool_calls_chunks:
+                        for tc_chunk in chunk.tool_call_chunks:
+                            idx = tc_chunk.get('index', 0)
+                            if idx not in tool_calls_dict:
+                                tool_calls_dict[idx] = {
+                                    'id': tc_chunk.get('id', ''),
+                                    'name': tc_chunk.get('name', ''),
+                                    'args': ''
+                                }
+                            if tc_chunk.get('args'):
+                                tool_calls_dict[idx]['args'] += tc_chunk['args']
+                    
+                    ai_msg.tool_calls = [
+                        {
+                            'id': tc['id'],
+                            'name': tc['name'],
+                            'args': eval(tc['args'].replace('true', 'True').replace('false', 'False').replace('null', 'None')) if tc['args'] else {}
+                        }
+                        for tc in tool_calls_dict.values()
+                    ]
+                else:
+                    ai_msg = AIMessage(content=full_content)
                 
-                ai_msg.tool_calls = [
-                    {
-                        'id': tc['id'],
-                        'name': tc['name'],
-                        'args': eval(tc['args'].replace('true', 'True').replace('false', 'False').replace('null', 'None')) if tc['args'] else {}
-                    }
-                    for tc in tool_calls_dict.values()
-                ]
-            else:
-                ai_msg = AIMessage(content=full_content)
-            
-            self.memory.append(ai_msg)
-            self._trim_memory()
-            
-            if not ai_msg.tool_calls:
-                break
-            
-            for tool_call in ai_msg.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_id = tool_call["id"]
+                self.memory.append(ai_msg)
+                self._trim_memory()
                 
-                yield ("tool_call", {"name": tool_name, "args": tool_args})
+                if not ai_msg.tool_calls:
+                    break
                 
-                tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
-                if tool_func:
-                    tool_result = tool_func.invoke(tool_args)
-                    result_content = tool_result.content if hasattr(tool_result, 'content') else str(tool_result)
-                    yield ("tool_result", {"name": tool_name, "result": result_content})
-                    tool_message = ToolMessage(
-                        content=result_content,
-                        tool_call_id=tool_id
+                for tool_call in ai_msg.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_id = tool_call["id"]
+                    
+                    yield ("tool_call", {"name": tool_name, "args": tool_args})
+                    
+                    logger.log_tool_call(
+                        call_index=llm_calls,
+                        tool_name=tool_name,
+                        tool_args=tool_args
                     )
-                    self.memory.append(tool_message)
-        
-        if total_input_tokens == 0 and total_output_tokens == 0:
-            is_estimated = True
-            input_text = self._messages_to_text(self.memory)
-            total_input_tokens = self._estimate_tokens(input_text)
-            total_output_tokens = self._estimate_tokens(all_output_text)
-        
-        yield ("token_stats", {
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-            "llm_calls": llm_calls,
-            "estimated": is_estimated
-        })
+                    
+                    tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
+                    if tool_func:
+                        tool_result = tool_func.invoke(tool_args)
+                        result_content = tool_result.content if hasattr(tool_result, 'content') else str(tool_result)
+                        yield ("tool_result", {"name": tool_name, "result": result_content})
+                        
+                        logger.log_tool_result(
+                            tool_name=tool_name,
+                            result_length=len(result_content),
+                            result_preview=result_content
+                        )
+                        
+                        tool_message = ToolMessage(
+                            content=result_content,
+                            tool_call_id=tool_id
+                        )
+                        self.memory.append(tool_message)
+            
+            if total_input_tokens == 0 and total_output_tokens == 0:
+                is_estimated = True
+                input_text = self._messages_to_text(self.memory)
+                total_input_tokens = self._estimate_tokens(input_text)
+                total_output_tokens = self._estimate_tokens(all_output_text)
+            
+            yield ("token_stats", {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "llm_calls": llm_calls,
+                "estimated": is_estimated
+            })
+            
+            logger.log_session_end(
+                total_llm_calls=llm_calls,
+                total_input=total_input_tokens,
+                total_output=total_output_tokens,
+                estimated=is_estimated
+            )
+        finally:
+            end_rag_session(rag_session_id)
+            end_session(log_session_id)
 
 
 if __name__ == "__main__":

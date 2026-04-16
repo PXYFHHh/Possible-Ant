@@ -56,6 +56,27 @@ class Retriever:
             rrf_scores[chunk_id] += 1.0 / (k + rank)
         
         return dict(rrf_scores)
+
+    def weighted_reciprocal_rank_fusion(
+        self,
+        rankings: List[List[Tuple[str, float]]],
+        k: int = 60,
+        weights: Optional[List[float]] = None,
+    ) -> Dict[str, float]:
+        """对多路排序结果执行加权 RRF 融合。"""
+        if not rankings:
+            return {}
+
+        weights = weights or [1.0] * len(rankings)
+        fused_scores: Dict[str, float] = defaultdict(float)
+
+        for ranking, weight in zip(rankings, weights):
+            if not ranking or weight <= 0:
+                continue
+            for rank, (chunk_id, _) in enumerate(ranking, start=1):
+                fused_scores[chunk_id] += float(weight) / (k + rank)
+
+        return dict(fused_scores)
     
     def linear_fusion(
         self,
@@ -180,8 +201,16 @@ class Retriever:
                 "auto_merge_steps": 0,
             }
 
-        merged_docs, merged_count_l3_l2 = self.merge_to_parent_level(docs, threshold=AUTO_MERGE_THRESHOLD)
+        merge_pool_size = max(top_k * 2, 10)
+        merge_pool = docs[:merge_pool_size]
+
+        merged_docs, merged_count_l3_l2 = self.merge_to_parent_level(merge_pool, threshold=AUTO_MERGE_THRESHOLD)
         merged_docs, merged_count_l2_l1 = self.merge_to_parent_level(merged_docs, threshold=AUTO_MERGE_THRESHOLD)
+
+        remaining = docs[merge_pool_size:]
+        for doc in remaining:
+            if doc not in merged_docs:
+                merged_docs.append(doc)
 
         merged_docs.sort(key=lambda item: item.get("score") or item.get("hybrid_score") or 0.0, reverse=True)
         merged_docs = merged_docs[:top_k]

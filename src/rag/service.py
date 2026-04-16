@@ -7,7 +7,7 @@ import time
 import uuid
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .cache import LruCache
 from .chunker import Chunker
@@ -34,6 +34,7 @@ from .database import Database, _sha256_file
 from .embedding import EmbeddingService
 from .reranker import RerankerService
 from .bm25_index import BM25Index
+from .query_rewriter import build_variant_weights
 from .retriever import Retriever
 
 warnings.filterwarnings(
@@ -320,35 +321,11 @@ class RagService:
                     active.append(status)
         return active
 
-    def query(self, query: str, top_k: int = 5) -> dict:
-        started_total = time.perf_counter()
-        query = query.strip()
-
-        if not query:
-            return {"ok": False, "message": "query 不能为空", "results": []}
-
-        try:
-            top_k = int(top_k)
-        except Exception:
-            top_k = 5
-        top_k = max(1, min(top_k, 20))
-
-        documents_count = self._db.count_documents()
-        if documents_count <= 0:
-            return {"ok": False, "message": "知识库为空，请先上传并入库文档", "results": []}
-
-        if not self._bm25.is_built:
-            chunks = self._db.get_leaf_chunks(LEAF_RETRIEVE_LEVEL)
-            self._bm25.build(chunks)
-
-        params = self._retriever.dynamic_params(query, top_k)
-        candidate_k = params["candidate_k"]
-        query_id = str(uuid.uuid4())
-
+    def _retrieve_candidates(self, query: str, candidate_k: int) -> Dict[str, Any]:
         candidate_map: Dict[str, dict] = {}
         bm25_raw_scores: Dict[str, float] = {}
         vec_raw_scores: Dict[str, float] = {}
-        timing_ms = {"bm25": 0, "vector": 0, "rerank": 0, "auto_merge": 0, "total": 0}
+        timing_ms = {"bm25": 0, "vector": 0}
 
         bm25_started = time.perf_counter()
         if self._bm25.is_built:
@@ -359,7 +336,6 @@ class RagService:
                     continue
                 metadata = chunk.get("metadata", {})
                 bm25_raw_scores[chunk_id] = score
-
                 candidate_map.setdefault(
                     chunk_id,
                     {
@@ -408,7 +384,6 @@ class RagService:
 
                 similarity = 1.0 / (1.0 + float(distance))
                 vec_raw_scores[chunk_uid] = similarity
-
                 candidate_map.setdefault(
                     chunk_uid,
                     {
@@ -430,12 +405,128 @@ class RagService:
         except Exception as exc:
             vector_available = False
             vector_error = str(exc)
-            params["w_bm25"] = 1.0
-            params["w_vec"] = 0.0
             self.logger.warning("Vector retrieval fallback to BM25, reason: %s", exc)
-        timing_ms["vector"] = int((time.perf_counter() - vector_started) * 1000)
 
-        if not candidate_map:
+        timing_ms["vector"] = int((time.perf_counter() - vector_started) * 1000)
+        return {
+            "candidate_map": candidate_map,
+            "bm25_raw_scores": bm25_raw_scores,
+            "vec_raw_scores": vec_raw_scores,
+            "vector_available": vector_available,
+            "vector_error": vector_error,
+            "timing_ms": timing_ms,
+        }
+
+    def _compute_hybrid_scores(
+        self,
+        bm25_raw_scores: Dict[str, float],
+        vec_raw_scores: Dict[str, float],
+        params: Dict[str, float],
+    ) -> Tuple[Dict[str, float], str]:
+        bm25_sorted = sorted(bm25_raw_scores.items(), key=lambda x: x[1], reverse=True)
+        vec_sorted = sorted(vec_raw_scores.items(), key=lambda x: x[1], reverse=True)
+
+        if RRF_ENABLED and HYBRID_MODE == "rrf" and bm25_sorted and vec_sorted:
+            hybrid_scores = self._retriever.reciprocal_rank_fusion(bm25_sorted, vec_sorted, k=RRF_K)
+            return hybrid_scores, "rrf"
+
+        hybrid_scores = self._retriever.linear_fusion(
+            bm25_raw_scores,
+            vec_raw_scores,
+            params["w_bm25"],
+            params["w_vec"],
+        )
+        return hybrid_scores, "linear"
+
+    def query(self, query: str, top_k: int = 5, query_variants: Optional[List[str]] = None) -> dict:
+        started_total = time.perf_counter()
+        query = query.strip()
+
+        if not query:
+            return {"ok": False, "message": "query 不能为空", "results": []}
+
+        try:
+            top_k = int(top_k)
+        except Exception:
+            top_k = 5
+        top_k = max(1, min(top_k, 20))
+
+        documents_count = self._db.count_documents()
+        if documents_count <= 0:
+            return {"ok": False, "message": "知识库为空，请先上传并入库文档", "results": []}
+
+        if not self._bm25.is_built:
+            chunks = self._db.get_leaf_chunks(LEAF_RETRIEVE_LEVEL)
+            self._bm25.build(chunks)
+        query_id = str(uuid.uuid4())
+
+        variants = []
+        seen_variants = set()
+        for item in [query] + list(query_variants or []):
+            text = str(item or "").strip()
+            if not text or text in seen_variants:
+                continue
+            seen_variants.add(text)
+            variants.append(text)
+
+        timing_ms = {"bm25": 0, "vector": 0, "rerank": 0, "auto_merge": 0, "total": 0}
+        variant_weights = build_variant_weights(len(variants))
+        variant_reports: List[Dict[str, Any]] = []
+        aggregate_candidate_map: Dict[str, dict] = {}
+        aggregate_rankings: List[List[Tuple[str, float]]] = []
+        aggregate_ranking_weights: List[float] = []
+        aggregate_vector_available = False
+        vector_errors: List[str] = []
+        max_candidate_k = 0
+        params = self._retriever.dynamic_params(query, top_k)
+        per_variant_fusion_mode = "linear"
+
+        for idx, variant_query in enumerate(variants):
+            variant_params = self._retriever.dynamic_params(variant_query, top_k)
+            max_candidate_k = max(max_candidate_k, variant_params["candidate_k"])
+
+            raw = self._retrieve_candidates(variant_query, variant_params["candidate_k"])
+            timing_ms["bm25"] += raw["timing_ms"]["bm25"]
+            timing_ms["vector"] += raw["timing_ms"]["vector"]
+
+            if raw["vector_available"]:
+                aggregate_vector_available = True
+            else:
+                variant_params["w_bm25"] = 1.0
+                variant_params["w_vec"] = 0.0
+                if raw["vector_error"] and raw["vector_error"] not in vector_errors:
+                    vector_errors.append(raw["vector_error"])
+
+            hybrid_scores, per_variant_fusion_mode = self._compute_hybrid_scores(
+                raw["bm25_raw_scores"],
+                raw["vec_raw_scores"],
+                variant_params,
+            )
+
+            ranking = sorted(hybrid_scores.items(), key=lambda x: x[1], reverse=True)
+            if ranking:
+                aggregate_rankings.append(ranking)
+                aggregate_ranking_weights.append(variant_weights[idx])
+
+            for chunk_uid, item in raw["candidate_map"].items():
+                existing = aggregate_candidate_map.get(chunk_uid)
+                if existing is None:
+                    aggregate_candidate_map[chunk_uid] = dict(item)
+                    existing = aggregate_candidate_map[chunk_uid]
+                existing["bm25_score"] = max(existing.get("bm25_score", 0.0), raw["bm25_raw_scores"].get(chunk_uid, 0.0))
+                existing["vector_score"] = max(existing.get("vector_score", 0.0), raw["vec_raw_scores"].get(chunk_uid, 0.0))
+
+            variant_reports.append(
+                {
+                    "query": variant_query,
+                    "weight": variant_weights[idx],
+                    "candidate_count": len(raw["candidate_map"]),
+                    "vector_available": raw["vector_available"],
+                    "fusion_mode": per_variant_fusion_mode,
+                }
+            )
+
+        if not aggregate_candidate_map:
             timing_ms["total"] = int((time.perf_counter() - started_total) * 1000)
             return {
                 "ok": True,
@@ -443,39 +534,39 @@ class RagService:
                 "query_id": query_id,
                 "results": [],
                 "weights": {"bm25": params["w_bm25"], "vector": params["w_vec"]},
-                "candidate_k": candidate_k,
+                "candidate_k": max_candidate_k,
                 "candidate_count": 0,
                 "reranker_enabled": False,
-                "vector_available": vector_available,
-                "vector_error": vector_error,
+                "vector_available": aggregate_vector_available,
+                "vector_error": "; ".join(vector_errors),
                 "timing_ms": timing_ms,
                 "documents_count": documents_count,
                 "auto_merge_enabled": AUTO_MERGE_ENABLED,
                 "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
                 "hybrid_mode": HYBRID_MODE,
+                "query_variants": variants,
+                "rewrite_enabled": len(variants) > 1,
+                "variant_reports": variant_reports,
             }
 
-        bm25_sorted = sorted(bm25_raw_scores.items(), key=lambda x: x[1], reverse=True)
-        vec_sorted = sorted(vec_raw_scores.items(), key=lambda x: x[1], reverse=True)
-
-        if RRF_ENABLED and HYBRID_MODE == "rrf" and bm25_sorted and vec_sorted:
-            hybrid_scores = self._retriever.reciprocal_rank_fusion(
-                bm25_sorted, vec_sorted, k=RRF_K
+        if len(aggregate_rankings) > 1:
+            hybrid_scores = self._retriever.weighted_reciprocal_rank_fusion(
+                aggregate_rankings,
+                k=RRF_K,
+                weights=aggregate_ranking_weights,
             )
-            fusion_mode = "rrf"
+            fusion_mode = "multi_query_rrf"
+        elif aggregate_rankings:
+            hybrid_scores = dict(aggregate_rankings[0])
+            fusion_mode = per_variant_fusion_mode
         else:
-            hybrid_scores = self._retriever.linear_fusion(
-                bm25_raw_scores, vec_raw_scores,
-                params["w_bm25"], params["w_vec"]
-            )
-            fusion_mode = "linear"
+            hybrid_scores = {}
+            fusion_mode = per_variant_fusion_mode
 
-        for chunk_uid, item in candidate_map.items():
-            item["bm25_score"] = bm25_raw_scores.get(chunk_uid, 0.0)
-            item["vector_score"] = vec_raw_scores.get(chunk_uid, 0.0)
+        for chunk_uid, item in aggregate_candidate_map.items():
             item["hybrid_score"] = hybrid_scores.get(chunk_uid, 0.0)
 
-        merged = sorted(candidate_map.values(), key=lambda x: x["hybrid_score"], reverse=True)
+        merged = sorted(aggregate_candidate_map.values(), key=lambda x: x["hybrid_score"], reverse=True)
         rerank_pool = merged[: max(top_k * 3, 10)]
 
         rerank_started = time.perf_counter()
@@ -507,8 +598,8 @@ class RagService:
         timing_ms["total"] = int((time.perf_counter() - started_total) * 1000)
         self.logger.info(
             "Query done: query_id=%s top_k=%s candidates=%s docs=%s total_ms=%s vector_ok=%s reranker=%s auto_merge=%s fusion=%s",
-            query_id, top_k, len(candidate_map), documents_count,
-            timing_ms["total"], vector_available, reranker_enabled,
+            query_id, top_k, len(aggregate_candidate_map), documents_count,
+            timing_ms["total"], aggregate_vector_available, reranker_enabled,
             merge_meta.get("auto_merge_applied", False), fusion_mode,
         )
 
@@ -518,11 +609,11 @@ class RagService:
             "query_id": query_id,
             "results": final_results,
             "weights": {"bm25": params["w_bm25"], "vector": params["w_vec"]},
-            "candidate_k": candidate_k,
-            "candidate_count": len(candidate_map),
+            "candidate_k": max_candidate_k,
+            "candidate_count": len(aggregate_candidate_map),
             "reranker_enabled": reranker_enabled,
-            "vector_available": vector_available,
-            "vector_error": vector_error,
+            "vector_available": aggregate_vector_available,
+            "vector_error": "; ".join(vector_errors),
             "timing_ms": timing_ms,
             "documents_count": documents_count,
             "auto_merge_enabled": AUTO_MERGE_ENABLED,
@@ -531,7 +622,10 @@ class RagService:
             "auto_merge_replaced_chunks": merge_meta.get("auto_merge_replaced_chunks", 0),
             "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
             "fusion_mode": fusion_mode,
-            "rrf_k": RRF_K if fusion_mode == "rrf" else None,
+            "rrf_k": RRF_K if fusion_mode in {"rrf", "multi_query_rrf"} else None,
+            "query_variants": variants,
+            "rewrite_enabled": len(variants) > 1,
+            "variant_reports": variant_reports,
         }
 
 
