@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 import warnings
@@ -72,6 +73,8 @@ class RagService:
         
         if BM25_PERSIST_ENABLED:
             self._bm25.load_state(self._db.count_chunks())
+
+        self._active_jobs: Dict[str, threading.Thread] = {}
 
     def _build_logger(self) -> logging.Logger:
         logger = logging.getLogger("agent.rag")
@@ -148,6 +151,9 @@ class RagService:
     def list_documents(self) -> List[Dict[str, Any]]:
         return self._db.list_documents()
 
+    def get_chunk_stats(self) -> Dict[str, Any]:
+        return self._db.get_chunk_length_stats()
+
     def list_ingest_jobs(self, limit: int = 10) -> List[Dict[str, Any]]:
         return self._db.list_ingest_jobs(limit=limit)
 
@@ -190,8 +196,24 @@ class RagService:
 
         job_id = str(uuid.uuid4())
         self._db.create_ingest_job(job_id, source)
-        started = time.perf_counter()
 
+        if job_id in self._active_jobs and self._active_jobs[job_id].is_alive():
+            return {"ok": False, "message": "该文档正在入库中，请稍候"}
+
+        thread = threading.Thread(target=self._do_ingest, args=(job_id, source, file_path), daemon=True)
+        self._active_jobs[job_id] = thread
+        thread.start()
+
+        return {
+            "ok": True,
+            "message": "已开始入库",
+            "job_id": job_id,
+            "source": source,
+            "status": "running",
+        }
+
+    def _do_ingest(self, job_id: str, source: str, file_path: Path) -> None:
+        started = time.perf_counter()
         try:
             delete_result = self._delete_document_internal(source=source, ignore_missing=True)
             if not delete_result.get("ok"):
@@ -202,38 +224,30 @@ class RagService:
             file_size = int(file_path.stat().st_size)
 
             all_chunks, all_parent_chunks = self._chunker.process_document(
-                file_path=file_path,
-                source=source,
-                doc_id=doc_id,
+                file_path=file_path, source=source, doc_id=doc_id,
             )
 
             if not all_chunks:
                 raise RuntimeError("文档切片结果为空")
 
+            total = len(all_chunks)
+            self._db.set_ingest_total(job_id, total)
+
             self._db.insert_document({
-                "doc_id": doc_id,
-                "source": source,
-                "file_path": str(file_path),
-                "content_hash": content_hash,
-                "file_size": file_size,
-                "chunk_count": len(all_chunks),
-                "vector_indexed": 1,
+                "doc_id": doc_id, "source": source, "file_path": str(file_path),
+                "content_hash": content_hash, "file_size": file_size,
+                "chunk_count": total, "vector_indexed": 0,
             })
 
             chunk_records = []
             for idx, chunk in enumerate(all_chunks):
                 chunk_records.append({
-                    "chunk_uid": f"{doc_id}::chunk::{idx}",
-                    "doc_id": doc_id,
-                    "source": source,
-                    "chunk_index": idx,
-                    "text": chunk["text"],
-                    "page": chunk.get("page_number"),
-                    "chunk_id": chunk["chunk_id"],
+                    "chunk_uid": f"{doc_id}::chunk::{idx}", "doc_id": doc_id,
+                    "source": source, "chunk_index": idx, "text": chunk["text"],
+                    "page": chunk.get("page_number"), "chunk_id": chunk["chunk_id"],
                     "parent_chunk_id": chunk.get("parent_chunk_id", ""),
                     "root_chunk_id": chunk.get("root_chunk_id", ""),
-                    "chunk_level": chunk.get("chunk_level", 3),
-                    "metadata": chunk,
+                    "chunk_level": chunk.get("chunk_level", 3), "metadata": chunk,
                 })
 
             self._db.insert_chunks(chunk_records)
@@ -241,6 +255,7 @@ class RagService:
 
             vs = self._embedding.get_vectorstore()
             batch_size = self._embedding.detect_batch_size(vs)
+            embedded = 0
 
             for i in range(0, len(all_chunks), batch_size):
                 batch = all_chunks[i:i + batch_size]
@@ -249,43 +264,61 @@ class RagService:
                 for j, c in enumerate(batch):
                     chunk_uid = f"{doc_id}::chunk::{i + j}"
                     metas.append({
-                        "source": source,
-                        "doc_id": doc_id,
-                        "chunk_id": c["chunk_id"],
-                        "chunk_uid": chunk_uid,
-                        "page": c.get("page_number"),
+                        "source": source, "doc_id": doc_id, "chunk_id": c["chunk_id"],
+                        "chunk_uid": chunk_uid, "page": c.get("page_number"),
                         "parent_chunk_id": c.get("parent_chunk_id", ""),
                         "root_chunk_id": c.get("root_chunk_id", ""),
                         "chunk_level": c.get("chunk_level", 3),
                     })
-
                 vs.add_texts(texts=texts, metadatas=metas)
+                embedded += len(batch)
+                self._db.update_ingest_progress(job_id, embedded)
 
+            self._db.set_document_vector_indexed(doc_id, True)
             self._invalidate_indexes()
+
             duration_ms = int((time.perf_counter() - started) * 1000)
-            self._db.finish_ingest_job(job_id, "done", len(all_chunks), duration_ms=duration_ms)
+            self._db.finish_ingest_job(job_id, "done", total, duration_ms=duration_ms)
 
             self.logger.info(
                 "Ingest done: source=%s chunks=%d parent_chunks=%d duration_ms=%d",
-                source, len(all_chunks), len(all_parent_chunks), duration_ms
+                source, total, len(all_parent_chunks), duration_ms
             )
-
-            return {
-                "ok": True,
-                "message": "入库成功",
-                "source": source,
-                "doc_id": doc_id,
-                "chunk_count": len(all_chunks),
-                "parent_chunk_count": len(all_parent_chunks),
-                "duration_ms": duration_ms,
-            }
 
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
             error_msg = str(exc)
             self._db.finish_ingest_job(job_id, "failed", 0, error_msg, duration_ms)
             self.logger.exception("Ingest failed: source=%s", source)
-            return {"ok": False, "message": f"入库失败: {exc}"}
+        finally:
+            self._active_jobs.pop(job_id, None)
+
+    def get_job_status(self, job_id: str) -> dict:
+        job = self._db.get_ingest_job(job_id)
+        if not job:
+            return {"ok": False, "message": "任务不存在"}
+        is_running = job_id in self._active_jobs and self._active_jobs[job_id].is_alive()
+        return {
+            "ok": True,
+            "job_id": job["job_id"],
+            "source": job["source"],
+            "status": "running" if is_running else job["status"],
+            "total_chunks": job.get("total_chunks", 0),
+            "embedded_chunks": job.get("embedded_chunks", 0),
+            "chunk_count": job.get("chunk_count", 0),
+            "error_message": job.get("error_message", ""),
+            "started_at": job.get("started_at", ""),
+            "finished_at": job.get("finished_at", ""),
+        }
+
+    def get_active_jobs(self) -> list:
+        active = []
+        for jid, thread in list(self._active_jobs.items()):
+            if thread.is_alive():
+                status = self.get_job_status(jid)
+                if status.get("ok"):
+                    active.append(status)
+        return active
 
     def query(self, query: str, top_k: int = 5) -> dict:
         started_total = time.perf_counter()

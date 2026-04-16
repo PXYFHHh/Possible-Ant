@@ -337,6 +337,7 @@ class Agent:
         
         while True:
             full_content = ""
+            full_reasoning = ""
             tool_calls_chunks = []
             last_chunk = None
             usage_chunk = None
@@ -345,6 +346,10 @@ class Agent:
                 if chunk.content:
                     full_content += chunk.content
                     yield ("content", chunk.content)
+                
+                if hasattr(chunk, 'reasoning_content') and chunk.reasoning_content:
+                    full_reasoning += chunk.reasoning_content
+                    yield ("reasoning", chunk.reasoning_content)
                 
                 if hasattr(chunk, 'tool_call_chunks') and chunk.tool_call_chunks:
                     tool_calls_chunks.append(chunk)

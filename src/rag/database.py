@@ -118,6 +118,8 @@ class Database:
                     finished_at TEXT,
                     duration_ms INTEGER,
                     chunk_count INTEGER NOT NULL DEFAULT 0,
+                    total_chunks INTEGER NOT NULL DEFAULT 0,
+                    embedded_chunks INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT NOT NULL DEFAULT ''
                 )
                 """
@@ -130,6 +132,12 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_chunks_source ON parent_chunks(source)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_parent_chunks_parent_chunk_id ON parent_chunks(parent_chunk_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ingest_jobs_started_at ON ingest_jobs(started_at)")
+
+            for col in ("total_chunks", "embedded_chunks"):
+                try:
+                    conn.execute(f"ALTER TABLE ingest_jobs ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+                except Exception:
+                    pass
     
     def count_documents(self) -> int:
         with self._conn() as conn:
@@ -140,6 +148,25 @@ class Database:
         with self._conn() as conn:
             row = conn.execute("SELECT COUNT(1) AS cnt FROM chunks").fetchone()
         return int(row["cnt"] if row else 0)
+
+    def get_chunk_length_stats(self) -> Dict[str, Any]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT LENGTH(text) AS len FROM chunks").fetchall()
+        lengths = [row["len"] for row in rows if row["len"] is not None]
+        if not lengths:
+            return {"total": 0, "min": 0, "max": 0, "avg": 0, "distribution": []}
+        total = len(lengths)
+        min_len = min(lengths)
+        max_len = max(lengths)
+        avg_len = sum(lengths) / total
+        bins = [(0, 100), (100, 200), (200, 300), (300, 500), (500, 800), (800, 1200), (1200, 2000), (2000, 999999)]
+        distribution = []
+        for low, high in bins:
+            count = sum(1 for l in lengths if low <= l < high)
+            if count > 0:
+                label = f"{low}-{high}" if high < 999999 else f"{low}+"
+                distribution.append({"range": label, "count": count, "min": low, "max": high})
+        return {"total": total, "min": min_len, "max": max_len, "avg": round(avg_len, 1), "distribution": distribution}
     
     def count_vector_documents(self) -> int:
         with self._conn() as conn:
@@ -161,6 +188,27 @@ class Database:
                 """
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_ingest_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM ingest_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_ingest_total(self, job_id: str, total: int) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE ingest_jobs SET total_chunks = ? WHERE job_id = ?",
+                (total, job_id),
+            )
+
+    def update_ingest_progress(self, job_id: str, embedded: int) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE ingest_jobs SET embedded_chunks = ? WHERE job_id = ?",
+                (embedded, job_id),
+            )
     
     def get_document_by_source(self, source: str) -> Optional[Dict[str, Any]]:
         with self._conn() as conn:

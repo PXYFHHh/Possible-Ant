@@ -15,10 +15,23 @@ from .config import (
 )
 
 
+_STOPWORDS = {
+    "的", "了", "是", "在", "我", "有", "和", "就",
+    "不", "人", "都", "一", "个", "上", "也", "很",
+    "到", "说", "要", "去", "你", "会", "着", "没有",
+    "看", "好", "自己", "这", "那", "什么", "怎么",
+    "如何", "哪些", "哪个", "吗", "呢", "吧",
+    "啊", "哦", "嗯", "关于", "对于", "根据", "按照",
+    "中", "之", "以", "及", "其", "与", "或", "等",
+    "被", "把", "对", "从", "向", "为", "由",
+}
+
+
 def _tokenize(text: str) -> List[str]:
     if not text:
         return []
-    return re.findall(r"[\u4e00-\u9fff]|[A-Za-z0-9_]+", text.lower())
+    tokens = re.findall(r"[\u4e00-\u9fff]|[A-Za-z0-9_]+", text.lower())
+    return [t for t in tokens if t not in _STOPWORDS]
 
 
 def _now_str() -> str:

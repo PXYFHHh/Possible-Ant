@@ -1,11 +1,11 @@
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
-from werkzeug.utils import secure_filename
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,9 +43,23 @@ from src.core.tools import (
     read_file,
 )
 
+from src.chat.db import get_chat_db
+
 
 BASE_DIR = Path(__file__).resolve().parent
 FILES_DIR = BASE_DIR / "files"
+
+_UNSAFE_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_filename(name: str) -> str:
+    name = _UNSAFE_PATTERN.sub("", name).strip()
+    name = re.sub(r'\.+', ".", name)
+    if not name or name in (".", ".."):
+        raise ValueError("invalid filename")
+    return name
+
+
 ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 
 ALL_TOOLS = [
@@ -158,6 +172,127 @@ def api_chat_sync():
     return jsonify({"ok": True, "memory": agent.get_memory_status()})
 
 
+# ========== Chat History API ==========
+
+@app.get("/api/chat/conversations")
+def api_list_conversations():
+    db = get_chat_db()
+    convs = db.list_conversations()
+    active_id = db.get_active_conversation_id()
+    return jsonify({"ok": True, "conversations": convs, "activeId": active_id})
+
+
+@app.post("/api/chat/conversations")
+def api_create_conversation():
+    db = get_chat_db()
+    body = request.get_json(silent=True) or {}
+    title = str(body.get("title", "新对话")).strip() or "新对话"
+    conv = db.create_conversation(title)
+    return jsonify({"ok": True, "conversation": conv})
+
+
+@app.get("/api/chat/conversations/<conv_id>")
+def api_get_conversation(conv_id):
+    db = get_chat_db()
+    conv = db.get_conversation(conv_id)
+    if not conv:
+        return jsonify({"ok": False, "message": "对话不存在"}), 404
+    messages = db.get_messages(conv_id)
+    return jsonify({"ok": True, "conversation": conv, "messages": messages})
+
+
+@app.post("/api/chat/conversations/<conv_id>/activate")
+def api_activate_conversation(conv_id):
+    db = get_chat_db()
+    conv = db.get_conversation(conv_id)
+    if not conv:
+        return jsonify({"ok": False, "message": "对话不存在"}), 404
+    db.set_active_conversation(conv_id)
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/chat/conversations/<conv_id>")
+def api_delete_conversation(conv_id):
+    db = get_chat_db()
+    db.delete_conversation(conv_id)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/chat/conversations/batch-delete")
+def api_batch_delete_conversations():
+    db = get_chat_db()
+    body = request.get_json(silent=True) or {}
+    ids = body.get("ids", [])
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"ok": False, "message": "ids 必须是非空数组"}), 400
+    count = db.delete_conversations_batch(ids)
+    return jsonify({"ok": True, "deleted": count})
+
+
+@app.post("/api/chat/conversations/<conv_id>/messages")
+def api_append_message(conv_id):
+    db = get_chat_db()
+    conv = db.get_conversation(conv_id)
+    if not conv:
+        return jsonify({"ok": False, "message": "对话不存在"}), 404
+    body = request.get_json(silent=True) or {}
+    role = str(body.get("role", "")).strip()
+    if role == "user":
+        content = str(body.get("content", "")).strip()
+        if not content:
+            return jsonify({"ok": False, "message": "content 不能为空"}), 400
+        msg = db.append_user_message(conv_id, content)
+        return jsonify({"ok": True, "message": msg})
+    elif role == "assistant":
+        msg = db.create_assistant_message(conv_id)
+        return jsonify({"ok": True, "message": msg})
+    else:
+        return jsonify({"ok": False, "message": "role 必须是 user 或 assistant"}), 400
+
+
+@app.patch("/api/chat/conversations/<conv_id>/messages/<int:msg_id>")
+def api_update_message(conv_id, msg_id):
+    db = get_chat_db()
+    body = request.get_json(silent=True) or {}
+    action = str(body.get("action", "")).strip()
+    if action == "append_text":
+        content = str(body.get("content", ""))
+        db.append_text_segment(conv_id, msg_id, content)
+    elif action == "add_tool_call":
+        name = str(body.get("name", "tool"))
+        args = body.get("args", {})
+        if not isinstance(args, dict):
+            args = {}
+        db.add_tool_call_segment(conv_id, msg_id, name, args)
+    elif action == "set_tool_result":
+        result = str(body.get("result", ""))
+        db.update_tool_result(conv_id, msg_id, result)
+    elif action == "set_token_stats":
+        stats = body.get("stats", {})
+        if not isinstance(stats, dict):
+            stats = {}
+        db.set_token_stats(conv_id, msg_id, stats)
+    else:
+        return jsonify({"ok": False, "message": f"未知 action: {action}"}), 400
+    return jsonify({"ok": True})
+
+
+@app.post("/api/chat/conversations/<conv_id>/touch")
+def api_touch_conversation(conv_id):
+    db = get_chat_db()
+    db.touch_conversation(conv_id)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/chat/conversations/<conv_id>/title")
+def api_update_conversation_title(conv_id):
+    db = get_chat_db()
+    body = request.get_json(silent=True) or {}
+    title = str(body.get("title", "新对话")).strip() or "新对话"
+    db.update_conversation_title(conv_id, title)
+    return jsonify({"ok": True})
+
+
 @app.post("/api/chat/stream")
 def api_chat_stream():
     body = request.get_json(silent=True) or {}
@@ -177,6 +312,8 @@ def api_chat_stream():
             for event_type, data in event_iter:
                 if event_type == "content":
                     yield _json_sse("content", {"delta": data})
+                elif event_type == "reasoning":
+                    yield _json_sse("reasoning", {"delta": data})
                 elif event_type == "tool_call":
                     yield _json_sse("tool_call", data)
                 elif event_type == "tool_result":
@@ -239,7 +376,11 @@ def api_kb_upload():
         return jsonify({"ok": False, "message": "缺少上传文件(file)"}), 400
 
     raw_name = uploaded.filename or ""
-    filename = secure_filename(Path(raw_name).name)
+    try:
+        filename = _safe_filename(Path(raw_name).name)
+    except ValueError:
+        return jsonify({"ok": False, "message": "无效文件名"}), 400
+
     if not filename:
         return jsonify({"ok": False, "message": "无效文件名"}), 400
 
@@ -254,6 +395,37 @@ def api_kb_upload():
     result = service.ingest_file(filename)
     code = 200 if result.get("ok") else 400
     return jsonify(result), code
+
+
+@app.get("/api/kb/job/<job_id>")
+def api_kb_job(job_id: str):
+    service, err = _get_rag_service_safe()
+    if err:
+        return jsonify({"ok": False, "message": f"RAG 未就绪: {err}"}), 500
+
+    status = service.get_job_status(job_id)
+    code = 200 if status.get("ok") else 404
+    return jsonify(status), code
+
+
+@app.get("/api/kb/jobs/active")
+def api_kb_active_jobs():
+    service, err = _get_rag_service_safe()
+    if err:
+        return jsonify({"ok": False, "message": f"RAG 未就绪: {err}"}), 500
+
+    jobs = service.get_active_jobs()
+    return jsonify({"ok": True, "jobs": jobs, "count": len(jobs)})
+
+
+@app.get("/api/kb/chunks/stats")
+def api_kb_chunk_stats():
+    service, err = _get_rag_service_safe()
+    if err:
+        return jsonify({"ok": False, "message": f"RAG 未就绪: {err}"}), 500
+
+    stats = service.get_chunk_stats()
+    return jsonify({"ok": True, "stats": stats})
 
 
 @app.delete("/api/kb/documents/<path:source>")
