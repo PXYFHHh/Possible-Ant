@@ -1,3 +1,21 @@
+"""
+文档分块模块 —— 三层嵌套分块 + Markdown 结构感知
+
+分块策略：
+  1. 三层嵌套分块 (L1→L2→L3)：
+     L1 (大块, ~1200字) → L2 (中块, ~600字) → L3 (小块, ~300字)
+     每层保留父子关系，支持 Auto-merging 自动合并
+
+  2. Markdown 结构化分块：
+     按标题层级 (#, ##, ###) 分割，保留标题路径元数据
+     优先用于 Markdown 文档，普通文档使用递归字符分割
+
+  3. 结构保护：
+     代码块和表格在分块时不会被截断，使用占位符保护后恢复
+
+支持的文档格式：txt, md, pdf, docx
+"""
+
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,18 +52,29 @@ STRUCTURE_PATTERNS = {
 
 
 class MarkdownStructureSplitter:
-    """基于 Markdown 结构的智能切片器"""
+    """
+    基于 Markdown 标题结构的智能切片器。
+    
+    按 # ~ #### 标题将文档分割为多个 section，
+    每个 section 保留完整的标题层级路径作为元数据。
+    """
     
     def __init__(
         self,
         headers_to_split_on: List[Tuple[str, str]] = None,
         strip_headers: bool = False,
     ):
+        """
+        Args:
+            headers_to_split_on: 标题标记与元数据键名的映射列表
+            strip_headers: 是否从分块文本中移除标题行
+        """
         self.headers_to_split_on = headers_to_split_on or MARKDOWN_HEADER_SPLIT_CONFIG
         self.strip_headers = strip_headers
         self._header_pattern = self._build_header_pattern()
     
     def _build_header_pattern(self) -> re.Pattern:
+        """构建匹配所有配置标题级别的正则表达式"""
         header_patterns = []
         for marker, _ in self.headers_to_split_on:
             escaped = re.escape(marker)
@@ -54,9 +83,14 @@ class MarkdownStructureSplitter:
     
     def split_text(self, text: str) -> List[Dict[str, Any]]:
         """
-        按 Markdown 标题结构分割文本
+        按 Markdown 标题结构分割文本。
+
+        遍历每一行，遇到标题时：
+          1. 将当前累积的文本保存为一个 section
+          2. 更新当前标题层级（低级标题会清除同级/更深的标题上下文）
         
-        返回: [{"text": "...", "metadata": {"header_1": "...", "header_2": "..."}}, ...]
+        Returns:
+            [{"text": "...", "metadata": {"header_1": "...", "header_2": "..."}}, ...]
         """
         if not text or not text.strip():
             return []
@@ -120,7 +154,10 @@ class MarkdownStructureSplitter:
         sections: List[Dict[str, Any]],
         min_size: int = 100,
     ) -> List[Dict[str, Any]]:
-        """合并过小的分块"""
+        """
+        合并过小的分块：将长度 < min_size 的 section 与下一个 section 合并，
+        避免产生信息量不足的碎片化分块。
+        """
         if not sections:
             return []
         
@@ -145,7 +182,14 @@ class MarkdownStructureSplitter:
 
 
 class StructureAwareSplitter:
-    """结构感知的文本切片器，保护代码块、表格等结构"""
+    """
+    结构感知的文本切片器，保护代码块、表格等结构不被截断。
+
+    工作原理：
+      1. 提取需要保护的结构（代码块、表格），用占位符替换
+      2. 对替换后的文本执行常规递归字符分割
+      3. 将占位符恢复为原始结构
+    """
     
     def __init__(
         self,
@@ -153,6 +197,12 @@ class StructureAwareSplitter:
         chunk_overlap: int = 200,
         preserve_structures: List[str] = None,
     ):
+        """
+        Args:
+            chunk_size: 目标分块大小（字符数）
+            chunk_overlap: 分块重叠字符数
+            preserve_structures: 需要保护的结构类型列表，可选 "code_block", "table" 等
+        """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.preserve_structures = preserve_structures or ["code_block", "table"]
@@ -164,9 +214,10 @@ class StructureAwareSplitter:
     
     def _extract_structures(self, text: str) -> Tuple[str, Dict[int, str]]:
         """
-        提取需要保护的结构，用占位符替换
-        
-        返回: (处理后的文本, {占位符索引: 原始结构})
+        提取需要保护的结构，用占位符替换。
+
+        Returns:
+            (处理后的文本, {占位符索引: 原始结构文本})
         """
         protected: Dict[int, str] = {}
         modified_text = text
@@ -191,7 +242,7 @@ class StructureAwareSplitter:
         chunks: List[str],
         protected: Dict[int, str],
     ) -> List[str]:
-        """恢复被保护的结构"""
+        """恢复被保护的结构：将占位符替换回原始代码块/表格"""
         restored = []
         
         for chunk in chunks:
@@ -205,14 +256,21 @@ class StructureAwareSplitter:
         return restored
     
     def split_text(self, text: str) -> List[str]:
-        """分割文本，保护特定结构"""
+        """分割文本，保护特定结构（代码块/表格不会被截断）"""
         modified_text, protected = self._extract_structures(text)
         chunks = self._base_splitter.split_text(modified_text)
         return self._restore_structures(chunks, protected)
 
 
 class Chunker:
-    """文档分块服务，支持 Markdown 结构化切片"""
+    """
+    文档分块服务，支持 Markdown 结构化切片。
+
+    分块层次：
+      L1 (大块, ~1200字) → L2 (中块, ~600字) → L3 (小块, ~300字)
+      L1/L2 作为父块存入 parent_chunks 表，L3 作为叶块存入 chunks 表并建立向量索引。
+      父子关系通过 parent_chunk_id 和 root_chunk_id 维护。
+    """
     
     def __init__(
         self,
@@ -220,6 +278,12 @@ class Chunker:
         preserve_code_blocks: bool = True,
         preserve_tables: bool = True,
     ):
+        """
+        Args:
+            use_markdown_structure: 是否启用 Markdown 结构化分块
+            preserve_code_blocks: 是否保护代码块不被截断
+            preserve_tables: 是否保护表格不被截断
+        """
         self.use_markdown_structure = use_markdown_structure
         self.preserve_code_blocks = preserve_code_blocks
         self.preserve_tables = preserve_tables
@@ -246,6 +310,7 @@ class Chunker:
         )
     
     def _build_splitter(self, chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
+        """构建递归字符分割器，使用中英文友好的分隔符优先级"""
         return RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -257,7 +322,7 @@ class Chunker:
         return file_path.suffix.lower() in {".md", ".markdown"}
     
     def _detect_text_structure(self, text: str) -> Dict[str, Any]:
-        """检测文本的结构特征"""
+        """检测文本的结构特征（标题、代码块、表格、列表等），用于选择分块策略"""
         features = {
             "has_markdown_headers": bool(re.search(r"^#{1,6}\s+.+$", text, re.MULTILINE)),
             "has_code_blocks": bool(re.search(r"```", text)),
@@ -269,7 +334,11 @@ class Chunker:
         return features
     
     def load_document(self, file_path: Path):
-        """加载文档"""
+        """
+        加载文档，根据文件扩展名选择合适的 Loader。
+
+        支持：txt/md/markdown (TextLoader), pdf (PyPDFLoader), docx (Docx2txtLoader)
+        """
         suffix = file_path.suffix.lower()
         if suffix in {".txt", ".md", ".markdown"}:
             return TextLoader(str(file_path), encoding="utf-8").load()
@@ -280,11 +349,20 @@ class Chunker:
         raise ValueError("仅支持 txt/md/pdf/docx 文档")
     
     def _build_chunk_id(self, source: str, page: int, level: int, idx: int) -> str:
+        """构建分块唯一标识：{source}::p{page}::l{level}::{idx}"""
         return f"{source}::p{page}::l{level}::{idx}"
     
     MIN_CHUNK_LENGTH = 30
-    
+
     def _is_valid_chunk(self, text: str) -> bool:
+        """
+        校验分块是否有效。
+
+        无效分块条件：
+          - 纯空白或长度 < 30
+          - 仅包含标题行（无实际内容）
+          - 去除标题行后内容长度 < 30
+        """
         if not text or len(text.strip()) < self.MIN_CHUNK_LENGTH:
             return False
         
@@ -304,6 +382,7 @@ class Chunker:
         return True
     
     def _filter_invalid_chunks(self, chunks: List[Dict]) -> List[Dict]:
+        """过滤掉无效分块（内容过短或仅含标题）"""
         return [chunk for chunk in chunks if self._is_valid_chunk(chunk.get("text", ""))]
     
     def _split_by_markdown_structure(
@@ -316,12 +395,13 @@ class Chunker:
         page: int,
     ) -> Tuple[List[Dict], List[Dict]]:
         """
-        基于 Markdown 结构的分块策略
-        
+        基于 Markdown 结构的分块策略。
+
         流程：
-        1. 先按标题结构分割为多个 section
-        2. 每个 section 内部再进行三层嵌套分块
-        3. 保留标题层级信息作为元数据
+          1. 先按标题结构分割为多个 section（保留标题层级元数据）
+          2. 合并过小的 section
+          3. 每个 section 内部再进行三层嵌套分块 (L1→L2→L3)
+          4. 保留标题路径信息 (header_path) 作为元数据
         """
         all_chunks: List[Dict] = []
         parent_chunks: List[Dict] = []
@@ -440,10 +520,27 @@ class Chunker:
         is_markdown: bool = False,
     ) -> Tuple[List[Dict], List[Dict]]:
         """
-        三层嵌套分块：
-        L1 (大块) -> L2 (中块) -> L3 (小块)
-        
-        对于 Markdown 文档，优先使用结构化切片
+        三层嵌套分块：L1 (大块) → L2 (中块) → L3 (小块)。
+
+        对于 Markdown 文档且启用结构化分块时，优先使用 _split_by_markdown_structure。
+        否则使用递归字符分割器进行三层嵌套分块。
+
+        每个分块包含父子关系字段：
+          - parent_chunk_id: 直接父块的 chunk_id
+          - root_chunk_id:   L1 根块的 chunk_id
+          - chunk_level:     层级 (1/2/3)
+
+        Args:
+            text: 待分块的文本
+            base_doc: 基础元数据字典
+            page_global_chunk_idx: 全局分块索引起始值
+            doc_id: 文档 ID
+            source: 文件名
+            page: 页码
+            is_markdown: 是否为 Markdown 文档
+
+        Returns:
+            (all_chunks, all_parent_chunks) —— L3 叶块列表和 L1/L2 父块列表
         """
         if not text or not text.strip():
             return [], []
@@ -545,10 +642,17 @@ class Chunker:
         doc_id: str,
     ) -> Tuple[List[Dict], List[Dict]]:
         """
-        处理文档，返回所有分块
-        
+        处理完整文档，返回所有分块。
+
+        按页遍历文档，对每页内容执行三层分块，汇总所有叶块和父块。
+
+        Args:
+            file_path: 文件路径
+            source: 文件名
+            doc_id: 文档 ID
+
         Returns:
-            (all_chunks, all_parent_chunks)
+            (all_chunks, all_parent_chunks) 所有 L3 叶块和 L1/L2 父块
         """
         docs = self.load_document(file_path)
         

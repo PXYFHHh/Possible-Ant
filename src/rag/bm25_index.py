@@ -1,3 +1,18 @@
+"""
+BM25 稀疏索引模块 —— 关键词检索与持久化
+
+核心功能：
+  - 基于 rank_bm25.BM25Okapi 的稀疏检索
+  - 中文单字分词 + 英文数字词分词，过滤停用词
+  - 索引状态持久化到 JSON 文件，支持增量加载
+  - 文档数量变化时自动检测过期状态并重建
+
+分词策略：
+  - 中文：逐字分词（[\u4e00-\u9fff]）
+  - 英文/数字：按单词分词（[A-Za-z0-9_]+）
+  - 过滤停用词后构建词频统计
+"""
+
 import json
 import logging
 import re
@@ -14,7 +29,7 @@ from .config import (
     LEAF_RETRIEVE_LEVEL,
 )
 
-
+# 中文停用词集合（与 query_rewriter.py 共享语义，但独立维护以避免循环导入）
 _STOPWORDS = {
     "的", "了", "是", "在", "我", "有", "和", "就",
     "不", "人", "都", "一", "个", "上", "也", "很",
@@ -28,6 +43,11 @@ _STOPWORDS = {
 
 
 def _tokenize(text: str) -> List[str]:
+    """
+    分词函数：中文逐字分词，英文按单词分词，过滤停用词。
+    
+    例："RAG检索是什么" → ["r", "a", "g", "检", "索", "是", "什", "么"]（过滤后）
+    """
     if not text:
         return []
     tokens = re.findall(r"[\u4e00-\u9fff]|[A-Za-z0-9_]+", text.lower())
@@ -35,13 +55,22 @@ def _tokenize(text: str) -> List[str]:
 
 
 def _now_str() -> str:
+    """返回当前时间的格式化字符串"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class BM25Index:
-    """BM25 索引管理"""
+    """
+    BM25 稀疏索引管理器。
+    
+    使用 BM25Okapi 算法进行关键词检索，支持索引构建、查询、持久化和过期检测。
+    """
     
     def __init__(self, logger: Optional[logging.Logger] = None):
+        """
+        Args:
+            logger: 日志记录器
+        """
         self.logger = logger or logging.getLogger("agent.rag.bm25")
         self._bm25: Optional[BM25Okapi] = None
         self._chunks: List[dict] = []
@@ -50,14 +79,24 @@ class BM25Index:
     
     @property
     def is_built(self) -> bool:
+        """索引是否已构建"""
         return self._bm25 is not None
     
     @property
     def doc_count(self) -> int:
+        """已索引的文档数量"""
         return self._doc_count
     
     def build(self, chunks: List[dict]) -> None:
-        """构建BM25索引"""
+        """
+        构建 BM25 索引。
+        
+        对每个分块文本分词后构建 BM25Okapi 索引，
+        并在持久化启用时保存状态到文件。
+        
+        Args:
+            chunks: 分块列表，每个元素需包含 "text" 字段
+        """
         self._chunks = chunks
         tokenized = [_tokenize(item.get("text", "")) for item in chunks]
         self._bm25 = BM25Okapi(tokenized) if tokenized else None
@@ -68,10 +107,14 @@ class BM25Index:
     
     def search(self, query: str, top_k: int) -> List[Tuple[dict, float]]:
         """
-        搜索
-        
+        BM25 关键词检索。
+
+        Args:
+            query: 查询文本
+            top_k: 返回前 K 个结果
+
         Returns:
-            [(chunk, score), ...]
+            [(chunk_dict, bm25_score), ...] 按 BM25 分数降序
         """
         if not self._bm25 or not self._chunks:
             return []
@@ -83,7 +126,7 @@ class BM25Index:
         return [(self._chunks[i], float(scores[i])) for i in top_indices]
     
     def invalidate(self) -> None:
-        """清除索引"""
+        """清除索引和持久化状态文件"""
         self._bm25 = None
         self._chunks = []
         self._doc_count = 0
@@ -96,7 +139,12 @@ class BM25Index:
                 pass
     
     def _save_state(self) -> None:
-        """保存BM25状态到文件"""
+        """
+        保存 BM25 索引状态到 JSON 文件。
+        
+        保存内容：词表、文档频率、平均文档长度、分块 ID 列表。
+        不保存完整分块文本，加载时需从数据库重新读取。
+        """
         if not self._bm25 or not self._chunks:
             return
         
@@ -132,7 +180,17 @@ class BM25Index:
             self.logger.warning("Failed to save BM25 state: %s", exc)
     
     def load_state(self, current_chunk_count: int) -> bool:
-        """从文件加载BM25状态"""
+        """
+        从 JSON 文件加载 BM25 索引状态。
+
+        仅当保存的文档数量与当前数据库一致时才加载，否则视为过期。
+
+        Args:
+            current_chunk_count: 当前数据库中的分块数量
+
+        Returns:
+            True 表示状态有效，False 表示需要重建
+        """
         if not BM25_STATE_PATH.exists():
             return False
         

@@ -1,3 +1,17 @@
+"""
+重排序服务模块 —— Cross-Encoder 模型加载与重排序
+
+核心功能：
+  - 模型路径解析：与 embedding.py 相同的优先级策略（本地缓存 → ModelScope → HuggingFace）
+  - 冷却机制：重排失败后自动禁用，冷却期（默认 300 秒）后重试
+  - 懒加载：首次调用时才加载模型
+
+重排序流程：
+  1. 将 (query, doc_text) 对输入 CrossEncoder
+  2. 获取相关性分数
+  3. 按分数降序排列
+"""
+
 import logging
 import os
 import time
@@ -26,6 +40,7 @@ from .config import (
 
 
 def _resolve_model_path(model_name: str, modelscope_id: str) -> str:
+    """解析重排模型路径，优先级同 embedding.py 的 _resolve_model_path"""
     if Path(model_name).exists():
         return model_name
 
@@ -68,7 +83,7 @@ def _resolve_model_path(model_name: str, modelscope_id: str) -> str:
 
 
 def _find_model_in_dir(base_dir: Path, model_name: str) -> Optional[str]:
-    """在目录中递归查找模型目录"""
+    """在目录中递归查找模型目录，匹配 org/model 格式的模型名"""
     parts = model_name.split("/")
     if len(parts) != 2:
         return None
@@ -95,7 +110,7 @@ def _find_model_in_dir(base_dir: Path, model_name: str) -> Optional[str]:
 
 
 def _is_valid_model_dir(path: Path) -> bool:
-    """检查目录是否是有效的模型目录"""
+    """检查目录是否是有效的模型目录（包含 config.json 和模型权重文件）"""
     if not path.is_dir():
         return False
     required_files = ["config.json", "model.safetensors", "pytorch_model.bin"]
@@ -104,9 +119,18 @@ def _is_valid_model_dir(path: Path) -> bool:
 
 
 class RerankerService:
-    """重排序服务"""
+    """
+    重排序服务。
+    
+    使用 Cross-Encoder 模型对检索结果进行精排。
+    内置冷却机制：加载或推理失败后自动禁用，冷却期后自动重试。
+    """
     
     def __init__(self, logger: Optional[logging.Logger] = None):
+        """
+        Args:
+            logger: 日志记录器
+        """
         self.logger = logger or logging.getLogger("agent.rag.reranker")
         self._reranker = None
         self._disabled = False
@@ -114,6 +138,11 @@ class RerankerService:
         self._last_error_at = 0.0
     
     def get(self) -> Optional[object]:
+        """
+        获取 CrossEncoder 实例（懒加载）。
+        
+        冷却期内返回 None，冷却期过后自动重试加载。
+        """
         now = time.time()
         if self._disabled and (now - self._last_error_at) < RERANK_RETRY_COOLDOWN_SECONDS:
             return None
@@ -147,10 +176,15 @@ class RerankerService:
         text_key: str = "text",
     ) -> Tuple[List[dict], Optional[str]]:
         """
-        对文档进行重排序
-        
+        对文档列表进行 Cross-Encoder 重排序。
+
+        Args:
+            query: 查询文本
+            docs: 待重排的文档列表
+            text_key: 文档中文本内容的键名
+
         Returns:
-            (reranked_docs, error_message)
+            (reranked_docs, error_message) —— 重排后的文档和可能的错误信息
         """
         if not docs:
             return docs, None
@@ -177,8 +211,10 @@ class RerankerService:
     
     @property
     def is_disabled(self) -> bool:
+        """重排服务是否处于禁用状态（冷却期内）"""
         return self._disabled
     
     @property
     def last_error(self) -> str:
+        """最近一次重排错误信息"""
         return self._last_error

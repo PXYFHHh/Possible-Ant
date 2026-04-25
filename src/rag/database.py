@@ -1,3 +1,16 @@
+"""
+RAG 元数据数据库模块 —— SQLite 持久化层
+
+管理文档、分块、父块、入库任务四类元数据。
+使用 WAL 模式 + RLock 保证线程安全，支持并发读写。
+
+表结构：
+  documents      —— 文档元信息（doc_id, source, content_hash, chunk_count, vector_indexed）
+  chunks         —— 叶分块（L3），包含文本和层级关系
+  parent_chunks  —— 父分块（L1/L2），用于 Auto-merging
+  ingest_jobs    —— 入库任务状态追踪
+"""
+
 import hashlib
 import json
 import logging
@@ -16,10 +29,12 @@ from .config import (
 
 
 def _now_str() -> str:
+    """返回当前时间的格式化字符串（YYYY-MM-DD HH:MM:SS）"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _sha256_file(file_path: Path) -> str:
+    """计算文件的 SHA256 哈希值，按 1MB 块读取避免内存溢出"""
     digest = hashlib.sha256()
     with file_path.open("rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
@@ -28,9 +43,19 @@ def _sha256_file(file_path: Path) -> str:
 
 
 class Database:
-    """SQLite 数据库管理类"""
+    """
+    SQLite 数据库管理类。
+    
+    线程安全：使用 RLock + 每次操作创建新连接，支持多线程并发访问。
+    性能优化：WAL 模式 + NORMAL 同步 + 64MB 缓存 + 内存临时存储。
+    """
     
     def __init__(self, db_path: Path = RAG_DB_PATH, logger: Optional[logging.Logger] = None):
+        """
+        Args:
+            db_path: SQLite 数据库文件路径
+            logger: 日志记录器
+        """
         self.db_path = db_path
         self._lock = threading.RLock()
         self.logger = logger or logging.getLogger("agent.rag.database")
@@ -38,6 +63,12 @@ class Database:
     
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
+        """
+        获取数据库连接的上下文管理器。
+
+        自动提交/回滚，设置 WAL 模式和外键约束。
+        每次操作创建新连接，避免多线程共享连接的问题。
+        """
         with self._lock:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -56,6 +87,7 @@ class Database:
                 conn.close()
     
     def _ensure_database(self) -> None:
+        """初始化数据库表结构和索引（幂等操作，重复调用安全）"""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -150,6 +182,7 @@ class Database:
         return int(row["cnt"] if row else 0)
 
     def get_chunk_length_stats(self) -> Dict[str, Any]:
+        """统计分块文本长度分布，返回最小/最大/平均值和分段分布"""
         with self._conn() as conn:
             rows = conn.execute("SELECT LENGTH(text) AS len FROM chunks").fetchall()
         lengths = [row["len"] for row in rows if row["len"] is not None]
@@ -253,6 +286,15 @@ class Database:
             )
     
     def delete_document(self, doc_id: str) -> List[str]:
+        """
+        删除文档及其所有分块（含父块），级联删除。
+
+        Args:
+            doc_id: 文档 ID
+
+        Returns:
+            被删除的 chunk_uid 列表（用于同步清理向量索引）
+        """
         with self._conn() as conn:
             chunk_rows = conn.execute(
                 "SELECT chunk_uid FROM chunks WHERE doc_id = ?",
@@ -357,6 +399,15 @@ class Database:
         }
     
     def get_leaf_chunks(self, leaf_level: int = 3) -> List[Dict[str, Any]]:
+        """
+        获取指定层级的叶分块，用于构建 BM25 索引。
+
+        Args:
+            leaf_level: 叶节点层级（默认 3，即 L3）
+
+        Returns:
+            [{"id": chunk_uid, "text": str, "metadata": dict}, ...]
+        """
         with self._conn() as conn:
             rows = conn.execute(
                 """
@@ -389,6 +440,7 @@ class Database:
         return chunks
     
     def existing_chunk_ids(self, chunk_ids: List[str]) -> set:
+        """批量检查哪些 chunk_uid 在数据库中已存在，用于过滤向量检索中的脏数据"""
         if not chunk_ids:
             return set()
         

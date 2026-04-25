@@ -1104,6 +1104,16 @@ input, textarea, select { font-family: inherit; font-size: inherit; }
   overflow-y: auto;
 }
 
+.round-block {
+  margin-bottom: 16px;
+  padding: 12px 0;
+}
+
+.round-block + .round-block {
+  border-top: 1px dashed var(--border);
+  padding-top: 16px;
+}
+
 .reasoning-content p { margin: 0.4em 0; }
 .reasoning-content p:first-child { margin-top: 0; }
 .reasoning-content p:last-child { margin-bottom: 0; }

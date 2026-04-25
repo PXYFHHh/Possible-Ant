@@ -230,6 +230,7 @@ function dbCreateAssistantMessage(convId) {
 }
 
 function dbAppendText(convId, msgDbId, delta) { _chatApi.updateMessage(convId, msgDbId, "append_text", { content: delta }).catch(function(){}); }
+function dbAppendReasoning(convId, msgDbId, delta) { _chatApi.updateMessage(convId, msgDbId, "append_reasoning", { content: delta }).catch(function(){}); }
 function dbAddToolCall(convId, msgDbId, name, args) { _chatApi.updateMessage(convId, msgDbId, "add_tool_call", { name: name, args: args }).catch(function(){}); }
 function dbSetToolResult(convId, msgDbId, result) { _chatApi.updateMessage(convId, msgDbId, "set_tool_result", { result: result }).catch(function(){}); }
 function dbSetTokenStats(convId, msgDbId, stats) { _chatApi.updateMessage(convId, msgDbId, "set_token_stats", { stats: stats }).catch(function(){}); }
@@ -502,31 +503,64 @@ function createAssistantMessageDom(entry) {
 
   node.appendChild(header); node.appendChild(bodyWrap); node.appendChild(statsWrap);
   messagesEl.appendChild(node);
-  return { node, bodyWrap, statsWrap, entry, toolCalls: [], currentTextBlock: null, currentTextSegment: null, hasOutput: false, reasoningBlock: null, reasoningContent: "" };
+  return {
+    node, bodyWrap, statsWrap, entry,
+    toolCalls: [], hasOutput: false,
+    rounds: [], currentRound: null, roundIndex: 0,
+  };
+}
+
+function startNewRound(msgObj) {
+  msgObj.roundIndex++;
+  const roundEl = document.createElement("div");
+  roundEl.className = "round-block";
+  roundEl.dataset.roundIndex = msgObj.roundIndex;
+  msgObj.bodyWrap.appendChild(roundEl);
+
+  const round = {
+    index: msgObj.roundIndex,
+    el: roundEl,
+    reasoningBlock: null,
+    reasoningContent: "",
+    textBlock: null,
+    textSegment: null,
+  };
+
+  msgObj.rounds.push(round);
+  msgObj.currentRound = round;
+  return round;
+}
+
+function getCurrentRound(msgObj) {
+  if (!msgObj.currentRound) return startNewRound(msgObj);
+  return msgObj.currentRound;
 }
 
 function ensureAssistantTextBlock(msgObj) {
-  if (msgObj.currentTextBlock && msgObj.currentTextSegment) return msgObj.currentTextBlock;
+  const round = getCurrentRound(msgObj);
+  if (round.textBlock && round.textSegment) return round.textBlock;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  msgObj.bodyWrap.appendChild(bubble);
+  round.el.appendChild(bubble);
   const seg = { type: "text", content: "" };
   msgObj.entry.segments.push(seg);
-  msgObj.currentTextBlock = bubble; msgObj.currentTextSegment = seg;
+  round.textBlock = bubble; round.textSegment = seg;
   return bubble;
 }
 
 function appendAssistantText(msgObj, delta, persist = true) {
   const text = String(delta || ""); if (!text) return;
+  const round = getCurrentRound(msgObj);
   const bubble = ensureAssistantTextBlock(msgObj);
-  msgObj.currentTextSegment.content += text;
-  bubble.innerHTML = renderMarkdown(msgObj.currentTextSegment.content);
+  round.textSegment.content += text;
+  bubble.innerHTML = renderMarkdown(round.textSegment.content);
   msgObj.hasOutput = true;
   if (persist) { touchConversation(getActiveConversation()); renderConversationList(searchInputEl.value); var convId = state.store.activeConversationId, dbId = _dbId(msgObj.entry); if (convId && dbId) dbAppendText(convId, dbId, text); }
 }
 
 function ensureReasoningBlock(msgObj) {
-  if (msgObj.reasoningBlock) return msgObj.reasoningBlock;
+  const round = getCurrentRound(msgObj);
+  if (round.reasoningBlock) return round.reasoningBlock;
   const wrapper = document.createElement("div");
   wrapper.className = "reasoning-wrapper";
   const header = document.createElement("div");
@@ -545,29 +579,34 @@ function ensureReasoningBlock(msgObj) {
   };
   const content = document.createElement("div");
   content.className = "reasoning-content";
-  wrapper.appendChild(header);
-  wrapper.appendChild(content);
-  msgObj.bodyWrap.insertBefore(wrapper, msgObj.bodyWrap.firstChild);
-  msgObj.reasoningBlock = content;
+  wrapper.appendChild(header); wrapper.appendChild(content);
+  round.el.appendChild(wrapper);
+  round.reasoningBlock = content;
   return content;
 }
 
-function appendReasoningText(msgObj, delta) {
+function appendReasoningText(msgObj, delta, persist = true) {
   const text = String(delta || ""); if (!text) return;
-  msgObj.reasoningContent += text;
+  const round = getCurrentRound(msgObj);
+  round.reasoningContent += text;
   const block = ensureReasoningBlock(msgObj);
-  block.innerHTML = renderMarkdown(msgObj.reasoningContent);
+  block.innerHTML = renderMarkdown(round.reasoningContent);
   msgObj.hasOutput = true;
+  if (persist) {
+    var convId = state.store.activeConversationId, dbId = _dbId(msgObj.entry);
+    if (convId && dbId) dbAppendReasoning(convId, dbId, text);
+  }
 }
 
 function renderToolCall(msgObj, payload, persist = true) {
-  msgObj.currentTextBlock = null; msgObj.currentTextSegment = null;
+  const round = getCurrentRound(msgObj);
+  round.textBlock = null; round.textSegment = null;
   const toolName = String(payload.name || "tool");
   const argsObj = payload.args && typeof payload.args === "object" ? payload.args : {};
   const seg = { type: "tool_call", name: toolName, args: argsObj, result: "" };
   msgObj.entry.segments.push(seg);
   const { details, resultBlock } = createToolDetails(toolName, argsObj, "等待工具返回...");
-  msgObj.bodyWrap.appendChild(details);
+  round.el.appendChild(details);
   msgObj.toolCalls.push({ name: toolName, resultBlock, done: false, segment: seg });
   msgObj.hasOutput = true;
   if (persist) { touchConversation(getActiveConversation()); renderConversationList(searchInputEl.value); var convId = state.store.activeConversationId, dbId = _dbId(msgObj.entry); if (convId && dbId) dbAddToolCall(convId, dbId, toolName, argsObj); }
@@ -798,10 +837,37 @@ function renderTokenStats(msgObj, payload, persist = true) {
 function renderAssistantFromHistory(entry) {
   console.log('[renderFromHistory] 恢复消息', { segments: (entry.segments || []).length, hasTokenStats: !!entry.token_stats });
   const msgObj = createAssistantMessageDom(entry);
+  const round = startNewRound(msgObj);
   for (const seg of entry.segments || []) {
-    if (seg.type === "text") {
+    if (seg.type === "reasoning") {
+      round.reasoningContent = seg.content || "";
+      const wrapper = document.createElement("div");
+      wrapper.className = "reasoning-wrapper";
+      const header = document.createElement("div");
+      header.className = "reasoning-header";
+      header.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>思考过程</span><span class="reasoning-toggle">收起</span>';
+      header.onclick = function() {
+        const content = wrapper.querySelector(".reasoning-content");
+        const toggle = header.querySelector(".reasoning-toggle");
+        if (content.style.display === "none") {
+          content.style.display = "block";
+          toggle.textContent = "收起";
+        } else {
+          content.style.display = "none";
+          toggle.textContent = "展开";
+        }
+      };
+      const content = document.createElement("div");
+      content.className = "reasoning-content";
+      content.innerHTML = renderMarkdown(seg.content || "");
+      wrapper.appendChild(header); wrapper.appendChild(content);
+      round.el.appendChild(wrapper);
+      round.reasoningBlock = content;
+    } else if (seg.type === "text") {
       const b = document.createElement("div"); b.className = "bubble"; b.innerHTML = renderMarkdown(seg.content || "");
-      msgObj.bodyWrap.appendChild(b);
+      round.el.appendChild(b);
+      round.textBlock = b;
+      round.textSegment = seg;
     } else if (seg.type === "tool_call") {
       var resultText = seg.result || "\u7B49\u5F85\u5DE5\u5177\u8FD4\u56DE...";
       if (isRagTextResult(resultText)) {
@@ -809,10 +875,12 @@ function renderAssistantFromHistory(entry) {
         if (tempDetails.resultBlock.classList.contains("rag-result-container")) {
           renderRagQueryResult(tempDetails.resultBlock, resultText);
         }
-        msgObj.bodyWrap.appendChild(tempDetails.details);
+        round.el.appendChild(tempDetails.details);
+        msgObj.toolCalls.push({ name: seg.name || "tool", resultBlock: tempDetails.resultBlock, done: true, segment: seg });
       } else {
-        const { details } = createToolDetails(seg.name || "tool", seg.args || {}, resultText);
-        msgObj.bodyWrap.appendChild(details);
+        const { details, resultBlock } = createToolDetails(seg.name || "tool", seg.args || {}, resultText);
+        round.el.appendChild(details);
+        msgObj.toolCalls.push({ name: seg.name || "tool", resultBlock: resultBlock, done: true, segment: seg });
       }
     }
   }
@@ -881,6 +949,10 @@ async function consumeStream(response, msgObj) {
       const { event, payload } = parsed;
       if (event === "content") appendAssistantText(msgObj, payload.delta);
       else if (event === "reasoning") appendReasoningText(msgObj, payload.delta);
+      else if (event === "phase") {
+        const phaseType = payload && payload.type;
+        if (phaseType === "thinking") startNewRound(msgObj);
+      }
       else if (event === "tool_call") renderToolCall(msgObj, payload);
       else if (event === "tool_result") renderToolResult(msgObj, payload);
       else if (event === "token_stats") renderTokenStats(msgObj, payload);

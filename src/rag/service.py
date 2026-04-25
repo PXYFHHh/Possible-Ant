@@ -1,3 +1,17 @@
+"""
+RAG 统一服务模块 —— 文档入库、检索查询、删除、健康检查的入口
+
+本模块是 RAG 系统的核心服务层，协调各子模块完成完整的 RAG 流程：
+  文档入库: ingest_file → 分块(chunker) → 向量化(embedding) → 持久化(database+chroma)
+  检索查询: query → 多路召回(BM25+向量) → 混合融合(RRF/线性) → 重排(reranker) → Auto-merging
+
+关键特性：
+  - 三层嵌套分块 (L1→L2→L3) + Auto-merging 自动合并
+  - 混合检索 (BM25 稀疏 + 向量密集) + RRF/线性融合
+  - 查询改写 (多变体生成 + 加权融合)
+  - 异步入库 (线程池 + 进度追踪)
+"""
+
 import hashlib
 import json
 import logging
@@ -50,7 +64,18 @@ warnings.filterwarnings(
 
 
 class RagService:
-    """RAG 统一服务：入库、查询、删除、健康检查。支持三层分块和Auto-merging。"""
+    """
+    RAG 统一服务：入库、查询、删除、健康检查。支持三层分块和Auto-merging。
+
+    子模块协调关系：
+      Chunker         → 文档分块（三层嵌套 + Markdown 结构感知）
+      EmbeddingService → 向量嵌入 + Chroma 向量库
+      BM25Index       → BM25 稀疏索引
+      RerankerService → Cross-Encoder 重排序
+      Database        → SQLite 元数据管理
+      Retriever       → 混合检索 + RRF/线性融合 + Auto-merging
+      LruCache        → 父块缓存
+    """
 
     def __init__(self):
         self._ensure_dirs()
@@ -78,6 +103,7 @@ class RagService:
         self._active_jobs: Dict[str, threading.Thread] = {}
 
     def _build_logger(self) -> logging.Logger:
+        """构建 RAG 模块专用的文件日志记录器，输出到 RAG_LOG_PATH"""
         logger = logging.getLogger("agent.rag")
         if logger.handlers:
             return logger
@@ -97,21 +123,34 @@ class RagService:
         return logger
 
     def _ensure_dirs(self) -> None:
+        """确保文件存储、向量库、数据库等目录存在"""
         FILES_DIR.mkdir(parents=True, exist_ok=True)
         CHROMA_DIR.mkdir(parents=True, exist_ok=True)
         RAG_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     def _build_doc_id(self, source: str, content_hash: str) -> str:
+        """根据文件名和内容哈希生成唯一文档 ID（SHA256 前32位）"""
         seed = f"{source}::{content_hash}"
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
     def _invalidate_indexes(self) -> None:
+        """使 BM25 索引和父块缓存失效（文档变更后调用）"""
         self._bm25.invalidate()
         
         if self._parent_chunk_cache:
             self._parent_chunk_cache.clear()
 
     def health_status(self, job_limit: int = 5, probe_models: bool = False) -> dict:
+        """
+        获取 RAG 系统健康状态摘要。
+
+        Args:
+            job_limit: 返回的最近入库任务数量
+            probe_models: 是否探测模型加载状态（会触发首次加载）
+
+        Returns:
+            包含各子模块状态的字典
+        """
         vector_ready = self._embedding._vectorstore is not None
         vector_error = ""
         if probe_models and not vector_ready:
@@ -159,9 +198,28 @@ class RagService:
         return self._db.list_ingest_jobs(limit=limit)
 
     def delete_document(self, source: str) -> dict:
+        """
+        删除指定文档及其所有分块和向量索引。
+
+        Args:
+            source: 文件名
+
+        Returns:
+            {"ok": bool, "message": str, "deleted_chunks": int}
+        """
         return self._delete_document_internal(source=source, ignore_missing=False)
 
     def _delete_document_internal(self, source: str, ignore_missing: bool = False) -> dict:
+        """
+        内部删除文档实现。
+
+        Args:
+            source: 文件名
+            ignore_missing: 文档不存在时是否静默跳过（入库时先删旧版本用）
+
+        Returns:
+            操作结果字典
+        """
         doc = self._db.get_document_by_source(source)
         if not doc:
             if ignore_missing:
@@ -182,6 +240,18 @@ class RagService:
         return {"ok": True, "message": f"已删除文档: {source}", "deleted_chunks": len(chunk_ids)}
 
     def ingest_file(self, filename: str) -> dict:
+        """
+        异步入库文件。
+
+        启动后台线程执行入库流程，立即返回任务 ID。
+        入库流程：删除旧版本 → 分块 → 写入数据库 → 向量化 → 更新索引
+
+        Args:
+            filename: 文件名（须位于 files 目录下）
+
+        Returns:
+            {"ok": bool, "message": str, "job_id": str, "source": str, "status": str}
+        """
         source = str(filename).strip()
         if not source:
             return {"ok": False, "message": "filename 不能为空"}
@@ -214,6 +284,17 @@ class RagService:
         }
 
     def _do_ingest(self, job_id: str, source: str, file_path: Path) -> None:
+        """
+        实际入库逻辑（在后台线程中执行）。
+
+        流程：
+          1. 删除同源旧文档
+          2. 计算内容哈希，生成 doc_id
+          3. 调用 Chunker 分块（三层嵌套）
+          4. 写入 SQLite 元数据
+          5. 批量向量化并写入 Chroma
+          6. 更新索引和任务状态
+        """
         started = time.perf_counter()
         try:
             delete_result = self._delete_document_internal(source=source, ignore_missing=True)
@@ -322,6 +403,26 @@ class RagService:
         return active
 
     def _retrieve_candidates(self, query: str, candidate_k: int) -> Dict[str, Any]:
+        """
+        多路召回候选文档片段。
+
+        同时执行 BM25 稀疏检索和向量密集检索，合并候选集。
+        向量检索失败时自动降级为纯 BM25 模式。
+
+        Args:
+            query: 查询文本
+            candidate_k: 每路召回的候选数量
+
+        Returns:
+            {
+                "candidate_map":  {chunk_uid: chunk_info_dict},
+                "bm25_raw_scores": {chunk_uid: score},
+                "vec_raw_scores":  {chunk_uid: score},
+                "vector_available": bool,
+                "vector_error": str,
+                "timing_ms": {"bm25": int, "vector": int},
+            }
+        """
         candidate_map: Dict[str, dict] = {}
         bm25_raw_scores: Dict[str, float] = {}
         vec_raw_scores: Dict[str, float] = {}
@@ -423,6 +524,21 @@ class RagService:
         vec_raw_scores: Dict[str, float],
         params: Dict[str, float],
     ) -> Tuple[Dict[str, float], str]:
+        """
+        计算混合检索分数。
+
+        根据 HYBRID_MODE 配置选择融合策略：
+          - "rrf":    使用 RRF (Reciprocal Rank Fusion) 融合，需要两路结果均非空
+          - "linear": 使用线性加权融合 (w_bm25 * bm25_norm + w_vec * vec_norm)
+
+        Args:
+            bm25_raw_scores: BM25 原始分数 {chunk_uid: score}
+            vec_raw_scores:  向量检索原始分数 {chunk_uid: score}
+            params: 动态参数 {"w_bm25": float, "w_vec": float}
+
+        Returns:
+            (hybrid_scores, fusion_mode) 混合分数字典和使用的融合模式名
+        """
         bm25_sorted = sorted(bm25_raw_scores.items(), key=lambda x: x[1], reverse=True)
         vec_sorted = sorted(vec_raw_scores.items(), key=lambda x: x[1], reverse=True)
 
@@ -439,6 +555,32 @@ class RagService:
         return hybrid_scores, "linear"
 
     def query(self, query: str, top_k: int = 5, query_variants: Optional[List[str]] = None) -> dict:
+        """
+        RAG 检索查询主入口。
+
+        完整流程：
+          1. 查询预处理 + 多变体生成（查询改写）
+          2. 对每个变体执行多路召回（BM25 + 向量）
+          3. 混合融合（RRF / 线性加权 / 多查询加权 RRF）
+          4. Cross-Encoder 重排序
+          5. Auto-merging 自动合并（L3→L2→L1）
+          6. 返回 top_k 结果及详细元信息
+
+        Args:
+            query: 用户查询文本
+            top_k: 返回结果数量（1-20）
+            query_variants: 额外的查询变体列表（可选）
+
+        Returns:
+            {
+                "ok": bool,
+                "results": [...],           # 检索结果列表
+                "fusion_mode": str,         # 使用的融合模式
+                "query_variants": [...],    # 实际使用的查询变体
+                "timing_ms": {...},         # 各阶段耗时
+                ...
+            }
+        """
         started_total = time.perf_counter()
         query = query.strip()
 
@@ -633,6 +775,7 @@ _SERVICE: Optional[RagService] = None
 
 
 def get_rag_service() -> RagService:
+    """获取全局 RagService 单例（懒加载）"""
     global _SERVICE
     if _SERVICE is None:
         _SERVICE = RagService()

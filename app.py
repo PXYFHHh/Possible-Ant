@@ -1,3 +1,37 @@
+"""
+Flask Web 应用入口 —— 聊天 Agent + 知识库管理
+
+路由分组：
+  页面路由：
+    GET  /                    聊天页面
+    GET  /knowledge           知识库管理页面
+
+  聊天 API (/api/chat/)：
+    GET  /state               Agent 状态（内存、是否忙碌）
+    POST /reset               重置会话
+    POST /sync                同步对话历史到 Agent 内存
+    GET  /conversations       对话列表
+    POST /conversations       创建对话
+    GET  /conversations/<id>  获取对话详情和消息
+    POST /conversations/<id>/activate   激活对话
+    DELETE /conversations/<id>          删除对话
+    POST /conversations/batch-delete    批量删除对话
+    POST /conversations/<id>/messages   追加消息
+    PATCH /conversations/<id>/messages/<msg_id>  更新消息分段
+    POST /conversations/<id>/touch      更新对话时间戳
+    POST /conversations/<id>/title      更新对话标题
+    POST /stream              SSE 流式聊天（核心接口）
+
+  知识库 API (/api/kb/)：
+    GET  /documents           文档列表
+    GET  /health              健康检查
+    POST /upload              上传并入库文档
+    GET  /job/<job_id>        查询入库任务状态
+    GET  /jobs/active         活跃任务列表
+    GET  /chunks/stats        分块统计
+    DELETE /documents/<source> 删除文档
+"""
+
 import json
 import os
 import re
@@ -53,6 +87,12 @@ _UNSAFE_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def _safe_filename(name: str) -> str:
+    """
+    清理文件名中的危险字符，防止路径遍历攻击。
+    
+    移除 Windows/Unix 不允许的字符，合并连续点号，
+    拒绝空文件名和 "." / ".."。
+    """
     name = _UNSAFE_PATTERN.sub("", name).strip()
     name = re.sub(r'\.+', ".", name)
     if not name or name in (".", ".."):
@@ -63,6 +103,7 @@ def _safe_filename(name: str) -> str:
 ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 
 ALL_TOOLS = [
+    # 基础工具
     get_current_time,
     get_search_results,
     create_file,
@@ -73,12 +114,14 @@ ALL_TOOLS = [
     calculate,
     calculate_percentage,
     calculate_average,
+    # 可视化工具
     plot_line_chart,
     plot_bar_chart,
     plot_pie_chart,
     plot_scatter_chart,
     plot_histogram,
     plot_multi_line_chart,
+    # ManicTime 效率工具
     get_manictime_schema,
     get_today_activities,
     get_activities_by_date_range,
@@ -87,8 +130,10 @@ ALL_TOOLS = [
     get_screen_time_today,
     get_screen_time_by_date,
     get_productivity_with_screen_time,
+    # DeepSeek 用量查询
     get_deepseek_balance,
     get_deepseek_usage,
+    # RAG 知识库工具
     rag_ingest_document,
     rag_query,
     rag_list_documents,
@@ -103,10 +148,12 @@ _generation_lock = threading.Lock()
 
 
 def _json_sse(event_name: str, payload: dict) -> str:
+    """构造 SSE 事件字符串：event: <name>\ndata: <json>\n\n"""
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def get_agent() -> Agent:
+    """获取全局 Agent 单例（双重检查锁，懒加载）"""
     global _agent_instance
     if _agent_instance is None:
         with _agent_init_lock:
@@ -117,6 +164,7 @@ def get_agent() -> Agent:
 
 
 def _get_rag_service_safe():
+    """安全获取 RAG 服务实例，失败时返回 (None, error_message)"""
     try:
         from src.rag.service import get_rag_service
 
@@ -127,16 +175,19 @@ def _get_rag_service_safe():
 
 @app.get("/")
 def chat_page():
+    """聊天页面"""
     return render_template("chat.html")
 
 
 @app.get("/knowledge")
 def knowledge_page():
+    """知识库管理页面"""
     return render_template("knowledge.html")
 
 
 @app.get("/api/chat/state")
 def api_chat_state():
+    """获取 Agent 当前状态（内存信息、是否正在生成）"""
     agent = get_agent()
     return jsonify(
         {
@@ -149,6 +200,7 @@ def api_chat_state():
 
 @app.post("/api/chat/reset")
 def api_chat_reset():
+    """重置 Agent 会话内存，生成中不允许重置"""
     if _generation_lock.locked():
         return jsonify({"ok": False, "message": "当前正在生成，请先停止生成"}), 409
 
@@ -159,6 +211,7 @@ def api_chat_reset():
 
 @app.post("/api/chat/sync")
 def api_chat_sync():
+    """同步前端对话历史到 Agent 内存，用于恢复上下文"""
     if _generation_lock.locked():
         return jsonify({"ok": False, "message": "当前正在生成，请先停止生成"}), 409
 
@@ -176,6 +229,7 @@ def api_chat_sync():
 
 @app.get("/api/chat/conversations")
 def api_list_conversations():
+    """获取对话列表及当前活跃对话 ID"""
     db = get_chat_db()
     convs = db.list_conversations()
     active_id = db.get_active_conversation_id()
@@ -258,6 +312,9 @@ def api_update_message(conv_id, msg_id):
     if action == "append_text":
         content = str(body.get("content", ""))
         db.append_text_segment(conv_id, msg_id, content)
+    elif action == "append_reasoning":
+        content = str(body.get("content", ""))
+        db.append_reasoning_segment(conv_id, msg_id, content)
     elif action == "add_tool_call":
         name = str(body.get("name", "tool"))
         args = body.get("args", {})
@@ -295,6 +352,19 @@ def api_update_conversation_title(conv_id):
 
 @app.post("/api/chat/stream")
 def api_chat_stream():
+    """
+    SSE 流式聊天接口（核心）。
+    
+    通过 generation_lock 保证同一时间只有一个生成任务。
+    Agent 的 React_Agent_Stream_UI 生成的事件被转换为 SSE 格式推送：
+      - content:    文本增量
+      - reasoning:  推理过程增量
+      - tool_call:  工具调用通知
+      - tool_result: 工具执行结果
+      - token_stats: Token 统计
+      - done:       生成完成
+      - error:      生成失败
+    """
     body = request.get_json(silent=True) or {}
     message = str(body.get("message", "")).strip()
     if not message:
@@ -314,6 +384,8 @@ def api_chat_stream():
                     yield _json_sse("content", {"delta": data})
                 elif event_type == "reasoning":
                     yield _json_sse("reasoning", {"delta": data})
+                elif event_type == "phase":
+                    yield _json_sse("phase", data)
                 elif event_type == "tool_call":
                     yield _json_sse("tool_call", data)
                 elif event_type == "tool_result":
@@ -367,6 +439,12 @@ def api_kb_health():
 
 @app.post("/api/kb/upload")
 def api_kb_upload():
+    """
+    上传文档到知识库。
+    
+    流程：校验文件名 → 检查扩展名 → 保存到 files/ → 调用 RAG 入库
+    支持格式：.txt, .md, .markdown, .pdf, .docx
+    """
     service, err = _get_rag_service_safe()
     if err:
         return jsonify({"ok": False, "message": f"RAG 未就绪: {err}"}), 500
