@@ -43,40 +43,6 @@ from flask import Flask, Response, jsonify, render_template, request, stream_wit
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.core.agent import Agent, Model
-from src.core.tools import (
-    calculate,
-    calculate_average,
-    calculate_percentage,
-    create_file,
-    delete_file,
-    delete_multiple_files,
-    get_activities_by_date_range,
-    get_application_usage,
-    get_current_time,
-    get_deepseek_balance,
-    get_deepseek_usage,
-    get_manictime_schema,
-    get_productivity_summary,
-    get_productivity_with_screen_time,
-    get_screen_time_by_date,
-    get_screen_time_today,
-    get_search_results,
-    get_today_activities,
-    list_files,
-    plot_bar_chart,
-    plot_histogram,
-    plot_line_chart,
-    plot_multi_line_chart,
-    plot_pie_chart,
-    plot_scatter_chart,
-    rag_delete_document,
-    rag_ingest_document,
-    rag_list_documents,
-    rag_query,
-    read_file,
-)
-
 from src.chat.db import get_chat_db
 
 
@@ -102,44 +68,6 @@ def _safe_filename(name: str) -> str:
 
 ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 
-ALL_TOOLS = [
-    # 基础工具
-    get_current_time,
-    get_search_results,
-    create_file,
-    read_file,
-    list_files,
-    delete_file,
-    delete_multiple_files,
-    calculate,
-    calculate_percentage,
-    calculate_average,
-    # 可视化工具
-    plot_line_chart,
-    plot_bar_chart,
-    plot_pie_chart,
-    plot_scatter_chart,
-    plot_histogram,
-    plot_multi_line_chart,
-    # ManicTime 效率工具
-    get_manictime_schema,
-    get_today_activities,
-    get_activities_by_date_range,
-    get_application_usage,
-    get_productivity_summary,
-    get_screen_time_today,
-    get_screen_time_by_date,
-    get_productivity_with_screen_time,
-    # DeepSeek 用量查询
-    get_deepseek_balance,
-    get_deepseek_usage,
-    # RAG 知识库工具
-    rag_ingest_document,
-    rag_query,
-    rag_list_documents,
-    rag_delete_document,
-]
-
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 _agent_instance = None
@@ -152,14 +80,44 @@ def _json_sse(event_name: str, payload: dict) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def get_agent() -> Agent:
+def get_agent() -> "Agent":
     """获取全局 Agent 单例（双重检查锁，懒加载）"""
     global _agent_instance
     if _agent_instance is None:
         with _agent_init_lock:
             if _agent_instance is None:
+                from src.core.agent import Agent, Model
+                from src.core.tools import (
+                    calculate, calculate_average, calculate_percentage,
+                    create_file, delete_file, delete_multiple_files,
+                    get_activities_by_date_range, get_application_usage,
+                    get_current_time, get_manictime_schema, get_productivity_summary,
+                    get_productivity_with_screen_time, get_screen_time_by_date,
+                    get_screen_time_today, get_search_results,
+                    get_today_activities, list_files,
+                    plot_bar_chart, plot_histogram, plot_line_chart,
+                    plot_multi_line_chart, plot_pie_chart, plot_scatter_chart,
+                    rag_delete_document, rag_ingest_document,
+                    rag_list_documents, rag_query, read_file,
+                )
+                
+                tools = [
+                    get_current_time, get_search_results,
+                    create_file, read_file, list_files,
+                    delete_file, delete_multiple_files,
+                    calculate, calculate_percentage, calculate_average,
+                    plot_line_chart, plot_bar_chart, plot_pie_chart,
+                    plot_scatter_chart, plot_histogram, plot_multi_line_chart,
+                    get_manictime_schema, get_today_activities,
+                    get_activities_by_date_range, get_application_usage,
+                    get_productivity_summary, get_screen_time_today,
+                    get_screen_time_by_date, get_productivity_with_screen_time,
+                    rag_ingest_document, rag_query,
+                    rag_list_documents, rag_delete_document,
+                ]
+                
                 model = Model()
-                _agent_instance = Agent(model, ALL_TOOLS)
+                _agent_instance = Agent(model, tools)
     return _agent_instance
 
 

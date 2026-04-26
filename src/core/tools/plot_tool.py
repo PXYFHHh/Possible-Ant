@@ -1,18 +1,27 @@
 from langchain_core.tools import tool
-import matplotlib.pyplot as plt
-import matplotlib
-import numpy as np
 import os
 from pathlib import Path
 from typing import List, Dict, Optional, Literal
 import json
 
-matplotlib.use('Agg')
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS']
-plt.rcParams['axes.unicode_minus'] = False
-
 FILES_DIR = Path(__file__).parent.parent.parent.parent / "files"
 FILES_DIR.mkdir(exist_ok=True)
+
+_mpl_initialized = False
+
+
+def _init_mpl():
+    """懒初始化 matplotlib + numpy，首次绘图时才 import，避免启动时加载重库"""
+    global _mpl_initialized, plt, np
+    if _mpl_initialized:
+        return
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial Unicode MS']
+    plt.rcParams['axes.unicode_minus'] = False
+    _mpl_initialized = True
 
 
 def _parse_data(data_str: str) -> List:
@@ -81,6 +90,7 @@ def plot_line_chart(
         )
     """
     try:
+        _init_mpl()
         x = _parse_data(x_data)
         y = _parse_data(y_data)
         
@@ -156,6 +166,7 @@ def plot_bar_chart(
         )
     """
     try:
+        _init_mpl()
         cats = [c.strip() for c in categories.split(',')]
         vals = _parse_data(values)
         
@@ -243,6 +254,7 @@ def plot_pie_chart(
         )
     """
     try:
+        _init_mpl()
         label_list = [l.strip() for l in labels.split(',')]
         value_list = _parse_data(values)
         
@@ -329,6 +341,7 @@ def plot_scatter_chart(
         )
     """
     try:
+        _init_mpl()
         x = _parse_data(x_data)
         y = _parse_data(y_data)
         
@@ -406,6 +419,7 @@ def plot_histogram(
         )
     """
     try:
+        _init_mpl()
         data_list = _parse_data(data)
         
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -486,6 +500,7 @@ def plot_multi_line_chart(
         )
     """
     try:
+        _init_mpl()
         x = _parse_data(x_data)
         
         y_lists = []

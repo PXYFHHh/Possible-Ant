@@ -1,5 +1,4 @@
 from langchain_core.tools import tool
-from ddgs import DDGS
 import re
 
 
@@ -76,6 +75,7 @@ def get_search_results(query: str, max_results: int = 5) -> str:
         过滤后的搜索结果
     """
     try:
+        from ddgs import DDGS
         ddgs = DDGS()
         results = ddgs.text(query, max_results=max_results * 2)
         

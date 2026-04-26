@@ -20,7 +20,6 @@ from .manictime_tracker import (
     get_screen_time_by_date,
     get_productivity_with_screen_time
 )
-from .deepseek_monitor import get_deepseek_balance, get_deepseek_usage
 from .rag_tools import (
     rag_ingest_document,
     rag_query,
@@ -54,8 +53,6 @@ __all__ = [
     "get_screen_time_today",
     "get_screen_time_by_date",
     "get_productivity_with_screen_time",
-    "get_deepseek_balance",
-    "get_deepseek_usage",
     "rag_ingest_document",
     "rag_query",
     "rag_list_documents",
