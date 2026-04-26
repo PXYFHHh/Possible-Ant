@@ -13,7 +13,6 @@
 """
 
 import logging
-import os
 import time
 import warnings
 from pathlib import Path
@@ -40,82 +39,9 @@ from .config import (
 
 
 def _resolve_model_path(model_name: str, modelscope_id: str) -> str:
-    """解析重排模型路径，优先级同 embedding.py 的 _resolve_model_path"""
-    if Path(model_name).exists():
-        return model_name
-
-    if USE_MODELSCOPE:
-        cache_dir = MODEL_CACHE_DIR / model_name.replace("/", "_")
-        if cache_dir.exists() and cache_dir.is_dir():
-            resolved = _find_model_in_dir(cache_dir, model_name)
-            if resolved:
-                return resolved
-
-        modelscope_cache_name = modelscope_id.replace(".", "___")
-        modelscope_cache_dir = MODEL_CACHE_DIR / modelscope_cache_name.replace("/", os.sep)
-        if modelscope_cache_dir.exists():
-            resolved = _find_model_in_dir(modelscope_cache_dir, model_name)
-            if resolved:
-                return resolved
-
-        parent_dir = MODEL_CACHE_DIR / model_name.split("/")[0]
-        if parent_dir.exists():
-            parts = model_name.split("/")
-            if len(parts) == 2:
-                org, model = parts
-                model_normalized = model.replace(".", "___")
-                for child in parent_dir.iterdir():
-                    if child.is_dir():
-                        resolved = _find_model_in_dir(child, model_name)
-                        if resolved:
-                            return resolved
-
-        try:
-            from modelscope import snapshot_download
-
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            snapshot_download(modelscope_id, cache_dir=str(cache_dir))
-            return str(cache_dir)
-        except Exception:
-            pass
-
-    return model_name
-
-
-def _find_model_in_dir(base_dir: Path, model_name: str) -> Optional[str]:
-    """在目录中递归查找模型目录，匹配 org/model 格式的模型名"""
-    parts = model_name.split("/")
-    if len(parts) != 2:
-        return None
-    org, model = parts
-    model_normalized = model.replace(".", "___")
-
-    def matches(child_name: str) -> bool:
-        return child_name.replace("___", ".") == model or child_name == model_normalized
-
-    if matches(base_dir.name):
-        if _is_valid_model_dir(base_dir):
-            return str(base_dir)
-
-    for child in base_dir.iterdir():
-        if child.is_dir():
-            if matches(child.name):
-                if _is_valid_model_dir(child):
-                    return str(child)
-            found = _find_model_in_dir(child, model_name)
-            if found:
-                return found
-
-    return None
-
-
-def _is_valid_model_dir(path: Path) -> bool:
-    """检查目录是否是有效的模型目录（包含 config.json 和模型权重文件）"""
-    if not path.is_dir():
-        return False
-    required_files = ["config.json", "model.safetensors", "pytorch_model.bin"]
-    has_model = any((path / f).exists() for f in required_files if f != "pytorch_model.bin" or not (path / "model.safetensors").exists())
-    return has_model or (path / "config.json").exists()
+    """解析重排模型路径，委托到公共 model_utils 模块"""
+    from .model_utils import _resolve_model_path as _do_resolve
+    return _do_resolve(model_name, modelscope_id, USE_MODELSCOPE, MODEL_CACHE_DIR)
 
 
 class RerankerService:

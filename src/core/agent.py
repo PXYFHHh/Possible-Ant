@@ -1,10 +1,8 @@
 """
 Agent 核心模块 —— ReAct 模式的 LLM Agent 实现
 
-本模块实现了基于 ReAct (Reasoning + Acting) 模式的智能体，支持：
-- 同步调用 (React_Agent)
-- 终端流式输出 (React_Agent_Stream)
-- SSE 流式输出供前端消费 (React_Agent_Stream_UI)
+本模块实现了基于 ReAct (Reasoning + Acting) 模式的智能体，
+通过 SSE 流式输出向前端推送事件，支持工具调用和推理过程可视化。
 
 安全说明：
   工具参数解析使用 _safe_parse_json_args()，替代了不安全的 eval()，
@@ -28,22 +26,6 @@ from langchain.chat_models import init_chat_model
 from typing import List, Callable, Dict, Optional, Tuple
 
 sys.path.append(".")
-from src.core.tools import (
-    get_current_time,
-    get_search_results,
-    create_file,
-    overwrite_file,
-    read_file,
-    delete_file,
-    list_files,
-    calculate,
-    calculate_percentage,
-    calculate_average,
-    rag_ingest_document,
-    rag_query,
-    rag_list_documents,
-    rag_delete_document,
-)
 from src.core.tools.rag_tools import start_rag_session, end_rag_session
 from src.core.session_logger import start_session, end_session
 
@@ -124,10 +106,7 @@ class Agent:
     核心工作流程：
       用户输入 → LLM 推理 → 判断是否需要调用工具 → 执行工具 → 将结果反馈给 LLM → 重复直到 LLM 不再调用工具
 
-    提供三种运行模式：
-      - React_Agent:         同步阻塞调用，等待完整响应后返回
-      - React_Agent_Stream:  终端流式输出，边生成边打印
-      - React_Agent_Stream_UI: SSE 流式输出，通过 yield 向前端推送事件
+    通过 React_Agent_Stream_UI() 以 SSE generator 形式向前端推送事件。
 
     Args:
         model: Model 实例，封装了 LLM 连接
@@ -311,20 +290,6 @@ class Agent:
         return "\n".join(parts)
 
     @staticmethod
-    def _format_token_info(total_input: int, total_output: int, llm_calls: int, estimated: bool = False) -> str:
-        """
-        格式化 Token 消耗统计信息，用于终端输出。
-        """
-        total_tokens = total_input + total_output
-        tag = " (估算)" if estimated else ""
-        return (
-            f"\n{'─' * 40}\n"
-            f"📊 Token消耗统计{tag} | LLM调用次数: {llm_calls}\n"
-            f"   输入: {total_input:,} tokens | 输出: {total_output:,} tokens | 合计: {total_tokens:,} tokens\n"
-            f"{'─' * 40}"
-        )
-
-    @staticmethod
     def _parse_tool_call_chunks(tool_calls_chunks: list) -> dict:
         """
         将流式响应中的 tool_call_chunks 碎片组装为完整的工具调用字典。
@@ -381,49 +346,6 @@ class Agent:
             ai_msg = AIMessage(content=full_content)
         return ai_msg
 
-    def _execute_tool_call(self, tool_call: dict, session_logger=None) -> tuple:
-        """
-        执行单个工具调用并将结果加入对话记忆。
-
-        Args:
-            tool_call: {"id": str, "name": str, "args": dict}
-            session_logger: 可选的会话日志记录器
-
-        Returns:
-            (tool_name, result_content) 工具名和执行结果文本
-        """
-        tool_name = tool_call["name"]
-        tool_args = tool_call["args"]
-        tool_id = tool_call["id"]
-
-        logger.info("调用工具: %s(%s)", tool_name, tool_args)
-
-        if session_logger:
-            session_logger.log_tool_call(
-                call_index=0,
-                tool_name=tool_name,
-                tool_args=tool_args,
-            )
-
-        tool_func = next((t for t in self.tools_list if t.name == tool_name), None)
-        result_content = ""
-        if tool_func:
-            tool_result = tool_func.invoke(tool_args)
-            result_content = tool_result.content if hasattr(tool_result, "content") else str(tool_result)
-            logger.info("工具返回: %s", result_content)
-
-            if session_logger:
-                session_logger.log_tool_result(
-                    tool_name=tool_name,
-                    result_length=len(result_content),
-                    result_preview=result_content,
-                )
-
-        tool_message = ToolMessage(content=result_content, tool_call_id=tool_id)
-        self.memory.append(tool_message)
-
-        return tool_name, result_content
-
     @staticmethod
     def _accumulate_token_usage(usage_chunk: Optional[dict], last_chunk, current_input: int, current_output: int) -> Tuple[int, int]:
         """
@@ -446,218 +368,6 @@ class Agent:
             token_usage = Agent._extract_token_usage(last_chunk)
             return current_input + token_usage["input_tokens"], current_output + token_usage["output_tokens"]
         return current_input, current_output
-
-    # ==================== Agent 运行方法 ====================
-
-    def React_Agent(self, user_input: str):
-        """
-        同步阻塞模式运行 Agent。
-
-        调用 LLM 并等待完整响应，若 LLM 请求调用工具则执行后再次调用 LLM，
-        循环直到 LLM 不再调用工具为止。
-
-        流程：
-          1. 将用户输入加入记忆
-          2. 启动 RAG 会话和日志会话
-          3. 调用 LLM → 若有工具调用则执行 → 重复
-          4. 统计 Token 消耗并记录日志
-          5. 返回 LLM 最终文本响应
-
-        Args:
-            user_input: 用户输入文本
-
-        Returns:
-            LLM 最终回复的文本内容
-        """
-        self.memory.append(HumanMessage(content=user_input))
-        self._trim_memory()
-
-        rag_session_id = str(uuid.uuid4())
-        start_rag_session(rag_session_id)
-
-        log_session_id = str(uuid.uuid4())
-        session_logger = start_session(log_session_id)
-        session_logger.log_user_input(user_input)
-
-        total_input_tokens = 0
-        total_output_tokens = 0
-        llm_calls = 0
-        is_estimated = False
-
-        try:
-            ai_msg = self.llm_with_tools.invoke(self.memory)
-            self.memory.append(ai_msg)
-
-            token_usage = self._extract_token_usage(ai_msg)
-            total_input_tokens += token_usage["input_tokens"]
-            total_output_tokens += token_usage["output_tokens"]
-            llm_calls += 1
-            session_logger.log_llm_call(
-                call_index=llm_calls,
-                input_tokens=token_usage["input_tokens"],
-                output_tokens=token_usage["output_tokens"],
-                estimated=False,
-                content_preview=ai_msg.content or "",
-            )
-
-            while ai_msg.tool_calls:
-                for tool_call in ai_msg.tool_calls:
-                    self._execute_tool_call(tool_call, session_logger)
-
-                ai_msg = self.llm_with_tools.invoke(self.memory)
-                self.memory.append(ai_msg)
-                self._trim_memory()
-
-                token_usage = self._extract_token_usage(ai_msg)
-                total_input_tokens += token_usage["input_tokens"]
-                total_output_tokens += token_usage["output_tokens"]
-                llm_calls += 1
-                session_logger.log_llm_call(
-                    call_index=llm_calls,
-                    input_tokens=token_usage["input_tokens"],
-                    output_tokens=token_usage["output_tokens"],
-                    estimated=False,
-                    content_preview=ai_msg.content or "",
-                )
-
-            if total_input_tokens == 0 and total_output_tokens == 0:
-                is_estimated = True
-                input_text = self._messages_to_text(self.memory)
-                total_input_tokens = self._estimate_tokens(input_text)
-                total_output_tokens = self._estimate_tokens(ai_msg.content or "")
-
-            session_logger.log_session_end(
-                total_llm_calls=llm_calls,
-                total_input=total_input_tokens,
-                total_output=total_output_tokens,
-                estimated=is_estimated,
-            )
-
-            return ai_msg.content
-        finally:
-            end_rag_session(rag_session_id)
-            end_session(log_session_id)
-
-    def React_Agent_Stream(self, user_input: str):
-        """
-        终端流式模式运行 Agent。
-
-        与 React_Agent 类似，但 LLM 响应通过流式输出逐字打印到终端。
-        支持多轮工具调用，设有最大迭代次数限制防止无限循环。
-
-        流程：
-          1. 将用户输入加入记忆
-          2. 循环：流式调用 LLM → 逐字打印 → 解析工具调用 → 执行工具
-          3. 当 LLM 不再调用工具或达到最大迭代次数时退出
-          4. 打印 Token 消耗统计
-
-        Args:
-            user_input: 用户输入文本
-
-        Returns:
-            LLM 最终回复的文本内容
-        """
-        self.memory.append(HumanMessage(content=user_input))
-        self._trim_memory()
-
-        rag_session_id = str(uuid.uuid4())
-        start_rag_session(rag_session_id)
-
-        log_session_id = str(uuid.uuid4())
-        session_logger = start_session(log_session_id)
-        session_logger.log_user_input(user_input)
-
-        total_input_tokens = 0
-        total_output_tokens = 0
-        llm_calls = 0
-        all_output_text = ""
-        is_estimated = False
-        iteration_count = 0
-
-        try:
-            while True:
-                iteration_count += 1
-                if iteration_count > self.max_iterations:
-                    print(f"\n[达到最大迭代次数 {self.max_iterations}，停止工具调用]")
-                    break
-
-                full_content = ""
-                tool_calls_chunks = []
-                last_chunk = None
-                usage_chunk = None
-
-                for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
-                    if chunk.content:
-                        print(chunk.content, end="", flush=True)
-                        full_content += chunk.content
-
-                    reasoning_content = getattr(chunk, "reasoning_content", None)
-                    if not reasoning_content:
-                        additional_kwargs = getattr(chunk, "additional_kwargs", None)
-                        if additional_kwargs and isinstance(additional_kwargs, dict):
-                            reasoning_content = additional_kwargs.get("reasoning_content")
-                    
-                    if reasoning_content:
-                        print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
-
-                    if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
-                        tool_calls_chunks.append(chunk)
-
-                    chunk_usage = self._extract_token_usage(chunk)
-                    if chunk_usage["input_tokens"] > 0 or chunk_usage["output_tokens"] > 0:
-                        usage_chunk = chunk_usage
-
-                    last_chunk = chunk
-
-                print()
-
-                total_input_tokens, total_output_tokens = self._accumulate_token_usage(
-                    usage_chunk, last_chunk, total_input_tokens, total_output_tokens,
-                )
-                llm_calls += 1
-                all_output_text += full_content
-
-                logged_input = usage_chunk["input_tokens"] if usage_chunk else (self._extract_token_usage(last_chunk)["input_tokens"] if last_chunk else 0)
-                logged_output = usage_chunk["output_tokens"] if usage_chunk else (self._extract_token_usage(last_chunk)["output_tokens"] if last_chunk else 0)
-                session_logger.log_llm_call(
-                    call_index=llm_calls,
-                    input_tokens=logged_input,
-                    output_tokens=logged_output,
-                    estimated=False,
-                    content_preview=full_content,
-                )
-
-                tool_calls_dict = self._parse_tool_call_chunks(tool_calls_chunks)
-                ai_msg = self._build_ai_message(full_content, tool_calls_dict)
-
-                self.memory.append(ai_msg)
-                self._trim_memory()
-
-                if not ai_msg.tool_calls:
-                    break
-
-                for tool_call in ai_msg.tool_calls:
-                    self._execute_tool_call(tool_call, session_logger)
-
-            if total_input_tokens == 0 and total_output_tokens == 0:
-                is_estimated = True
-                input_text = self._messages_to_text(self.memory)
-                total_input_tokens = self._estimate_tokens(input_text)
-                total_output_tokens = self._estimate_tokens(all_output_text)
-
-            session_logger.log_session_end(
-                total_llm_calls=llm_calls,
-                total_input=total_input_tokens,
-                total_output=total_output_tokens,
-                estimated=is_estimated,
-            )
-
-            print(self._format_token_info(total_input_tokens, total_output_tokens, llm_calls, is_estimated))
-
-            return ai_msg.content
-        finally:
-            end_rag_session(rag_session_id)
-            end_session(log_session_id)
 
     def React_Agent_Stream_UI(self, user_input: str):
         """
@@ -813,48 +523,3 @@ class Agent:
         finally:
             end_rag_session(rag_session_id)
             end_session(log_session_id)
-
-
-if __name__ == "__main__":
-    model = Model()
-    agent = Agent(model, [
-        get_current_time,
-        get_search_results,
-        create_file,
-        overwrite_file,
-        read_file,
-        delete_file,
-        list_files,
-        calculate,
-        calculate_percentage,
-        calculate_average,
-        rag_ingest_document,
-        rag_query,
-        rag_list_documents,
-        rag_delete_document,
-    ])
-
-    print("多轮对话已启动（输入 'exit' 退出，'clear' 清空记忆，'status' 查看记忆状态）\n")
-
-    while True:
-        user_input = input("请输入您的问题：").strip()
-
-        if not user_input:
-            continue
-
-        if user_input.lower() == "exit":
-            print("对话结束")
-            break
-
-        if user_input.lower() == "clear":
-            agent.clear_memory()
-            continue
-
-        if user_input.lower() == "status":
-            status = agent.get_memory_status()
-            print(f"记忆状态: {status['current_count']}/{status['max_memory']} (剩余: {status['remaining']})")
-            continue
-
-        print()
-        response = agent.React_Agent_Stream(user_input)
-        print()
