@@ -100,7 +100,39 @@ class EmbeddingService:
     
     def reset_vectorstore(self) -> None:
         self._vectorstore = None
-    
+
+    def estimate_embed_batch_size(self, texts: list) -> int:
+        """
+        根据可用系统内存和文本总量，动态估算安全的 embed_documents 批次大小。
+
+        策略：
+          1. 尝试用 psutil 获取当前可用内存，无法获取时回退到保守默认值
+          2. 预留 30% 可用内存用于嵌入计算
+          3. 按文本平均长度 × 60 字节估算单条嵌入峰值内存
+          4. 返回 max(32, min(2000, 可用内存/单条开销))
+        """
+        try:
+            import psutil
+            avail = psutil.virtual_memory().available
+        except Exception:
+            return 200
+
+        usable = int(avail * 0.30)
+        avg_chars = sum(len(t) for t in texts) / max(len(texts), 1)
+        per_chunk_mem = int(avg_chars * 60)
+
+        if per_chunk_mem <= 0:
+            return 200
+
+        dynamic = max(32, min(2000, usable // per_chunk_mem))
+        if total := len(texts):
+            dynamic = min(dynamic, total)
+        self.logger.debug(
+            "embed batch estimate: avail=%dMB usable=%dMB per_chunk=%dB calc=%d texts=%d",
+            avail // 1048576, usable // 1048576, per_chunk_mem, dynamic, total,
+        )
+        return dynamic
+
     def _detect_chroma_batch_limit(self) -> int:
         """
         检测 Chroma 当前版本的最大批次限制。
@@ -117,7 +149,8 @@ class EmbeddingService:
         """
         collection = getattr(vs, "_collection", None)
         client = getattr(vs, "_client", None)
-        
+        candidates = []
+
         for obj in (collection, client):
             if obj is None:
                 continue

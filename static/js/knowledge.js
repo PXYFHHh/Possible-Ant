@@ -193,6 +193,7 @@
 
   /* ========== Upload ========== */
   var _pollTimer = null;
+  var _pollDone = false;
 
   async function uploadDocument() {
     if (!selectedFile) {
@@ -236,6 +237,7 @@
   function startProgressPoll(jobId, fileName) {
     uploadButton.disabled = true;
     uploadButton.textContent = "入库中...";
+    _pollDone = false;
 
     uploadResult.className = "upload-result progress";
     uploadResult.style.display = "flex";
@@ -251,6 +253,7 @@
   }
 
   async function pollJobStatus(jobId) {
+    if (_pollDone) return;
     try {
       var res = await fetch("/api/kb/job/" + encodeURIComponent(jobId));
       var status = await res.json().catch(function () { return {}; });
@@ -276,6 +279,7 @@
       }
 
       if (status.status === "done") {
+        _pollDone = true;
         clearInterval(_pollTimer);
         _pollTimer = null;
         uploadResult.className = "upload-result success";
@@ -286,6 +290,7 @@
         loadHealth();
         loadChunksStats();
       } else if (status.status === "failed") {
+        _pollDone = true;
         clearInterval(_pollTimer);
         _pollTimer = null;
         uploadResult.className = "upload-result error";

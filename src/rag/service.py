@@ -336,25 +336,40 @@ class RagService:
             self._db.insert_parent_chunks(all_parent_chunks)
 
             vs = self._embedding.get_vectorstore()
-            batch_size = self._embedding.detect_batch_size(vs)
-            embedded = 0
+            chroma_batch_size = self._embedding.detect_batch_size(vs)
+            embedding = self._embedding.get_embedding()
+            all_texts = [c["text"] for c in all_chunks]
+            embed_batch_size = self._embedding.estimate_embed_batch_size(all_texts)
 
-            for i in range(0, len(all_chunks), batch_size):
-                batch = all_chunks[i:i + batch_size]
-                texts = [c["text"] for c in batch]
-                metas = []
-                for j, c in enumerate(batch):
-                    chunk_uid = f"{doc_id}::chunk::{i + j}"
-                    metas.append({
-                        "source": source, "doc_id": doc_id, "chunk_id": c["chunk_id"],
-                        "chunk_uid": chunk_uid, "page": c.get("page_number"),
-                        "parent_chunk_id": c.get("parent_chunk_id", ""),
-                        "root_chunk_id": c.get("root_chunk_id", ""),
-                        "chunk_level": c.get("chunk_level", 3),
-                    })
-                vs.add_texts(texts=texts, metadatas=metas)
-                embedded += len(batch)
-                self._db.update_ingest_progress(job_id, embedded)
+            ids = []
+            metas = []
+            for i, c in enumerate(all_chunks):
+                chunk_uid = f"{doc_id}::chunk::{i}"
+                ids.append(chunk_uid)
+                metas.append({
+                    "source": source, "doc_id": doc_id, "chunk_id": c["chunk_id"],
+                    "chunk_uid": chunk_uid, "page": c.get("page_number"),
+                    "parent_chunk_id": c.get("parent_chunk_id", ""),
+                    "root_chunk_id": c.get("root_chunk_id", ""),
+                    "chunk_level": c.get("chunk_level", 3),
+                })
+
+            collection = getattr(vs, "_collection", None)
+            if collection is None:
+                raise RuntimeError("Chroma collection not available")
+
+            all_embeddings = []
+            for i in range(0, len(all_chunks), embed_batch_size):
+                batch_texts = all_texts[i:i + embed_batch_size]
+                batch_embeddings = embedding.embed_documents(batch_texts)
+                all_embeddings.extend(batch_embeddings)
+                self._db.update_ingest_progress(job_id, len(all_embeddings))
+
+            for i in range(0, len(all_embeddings), chroma_batch_size):
+                batch_ids = ids[i:i + chroma_batch_size]
+                batch_embeddings = all_embeddings[i:i + chroma_batch_size]
+                batch_metas = metas[i:i + chroma_batch_size]
+                collection.add(ids=batch_ids, embeddings=batch_embeddings, metadatas=batch_metas)
 
             self._db.set_document_vector_indexed(doc_id, True)
             self._invalidate_indexes()
