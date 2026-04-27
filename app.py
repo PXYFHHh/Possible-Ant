@@ -39,7 +39,7 @@ import sys
 import threading
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory, stream_with_context
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -48,6 +48,8 @@ from src.chat.db import get_chat_db
 
 BASE_DIR = Path(__file__).resolve().parent
 FILES_DIR = BASE_DIR / "files"
+VUE_DIR = BASE_DIR / "static-vue"
+USE_VUE = VUE_DIR.exists()
 
 _UNSAFE_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -127,13 +129,33 @@ def _get_rag_service_safe():
 @app.get("/")
 def chat_page():
     """聊天页面"""
+    if USE_VUE:
+        return send_from_directory(str(VUE_DIR), "index.html")
     return render_template("chat.html")
 
 
 @app.get("/knowledge")
 def knowledge_page():
     """知识库管理页面"""
+    if USE_VUE:
+        return send_from_directory(str(VUE_DIR), "index.html")
     return render_template("knowledge.html")
+
+
+@app.get("/assets/<path:filename>")
+def vue_assets(filename: str):
+    """Vue 构建的静态资源"""
+    assets_dir = VUE_DIR / "assets"
+    return send_from_directory(str(assets_dir), filename)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    if USE_VUE:
+        favicon_path = VUE_DIR / "favicon.ico"
+        if favicon_path.exists():
+            return send_from_directory(str(VUE_DIR), "favicon.ico")
+    return "", 204
 
 
 @app.get("/api/chat/state")
