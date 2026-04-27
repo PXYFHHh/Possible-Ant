@@ -76,14 +76,17 @@ export const useKbStore = defineStore('knowledge', () => {
   }
 
   async function deleteDocument(source) {
+    const prev = [...documents.value]
+    documents.value = documents.value.filter((d) => d.source !== source)
     try {
       const res = await kbApi.deleteDocument(source)
-      if (res.ok) {
-        documents.value = documents.value.filter((d) => d.source !== source)
-        return true
+      if (!res.ok) {
+        documents.value = prev
+        return false
       }
-      return false
+      return true
     } catch {
+      documents.value = prev
       return false
     }
   }

@@ -8,9 +8,12 @@ async function request(method, url, body) {
 }
 
 export const chatApi = {
-  getState: () => request('GET', '/api/chat/state'),
-  resetMemory: () => request('POST', '/api/chat/reset'),
-  syncMessages: (messages) => request('POST', '/api/chat/sync', { messages }),
+  getState: (convId) => {
+    const params = convId ? `?conv_id=${encodeURIComponent(convId)}` : ''
+    return request('GET', `/api/chat/state${params}`)
+  },
+  resetMemory: (convId) => request('POST', '/api/chat/reset', { conv_id: convId || '' }),
+  syncMessages: (messages, convId) => request('POST', '/api/chat/sync', { messages, conv_id: convId || '' }),
   listConversations: () => request('GET', '/api/chat/conversations'),
   createConversation: (title) => request('POST', '/api/chat/conversations', { title: title || '新对话' }),
   getConversation: (id) => request('GET', `/api/chat/conversations/${id}`),
@@ -47,11 +50,11 @@ export function parseSSEChunk(chunk) {
   }
 }
 
-export async function streamChat(message, signal, callbacks) {
+export async function streamChat(message, convId, signal, callbacks) {
   const response = await fetch(BASE + '/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, conv_id: convId || '' }),
     signal,
   })
 

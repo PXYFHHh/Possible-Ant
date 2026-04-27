@@ -98,9 +98,9 @@ export const useChatStore = defineStore('chat', () => {
     const conv = activeConversation.value
     if (!conv) return
     const convMessages = conv.messages || []
-    await fetch('/api/chat/reset', { method: 'POST' }).catch(() => {})
+    await chatApi.resetMemory(conv.id)
     if (convMessages.length) {
-      await chatApi.syncMessages(convMessages)
+      await chatApi.syncMessages(convMessages, conv.id)
     }
   }
 
@@ -286,7 +286,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     try {
-      await streamChat(text, abortController.value.signal, {
+      await streamChat(text, activeId.value, abortController.value.signal, {
         onContent(delta) {
           getRound().type = 'text'
           const idx = rawEntry.segments.length - 1

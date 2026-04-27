@@ -256,6 +256,13 @@ class RagService:
         if not source:
             return {"ok": False, "message": "filename 不能为空"}
 
+        existing = self._db.get_document_by_source(source)
+        if existing:
+            return {
+                "ok": False,
+                "message": f"文档「{source}」已入库，如需重新入库请先删除旧文档",
+            }
+
         file_path = FILES_DIR / source
         if not file_path.exists():
             return {"ok": False, "message": f"文件不存在: {file_path}"}

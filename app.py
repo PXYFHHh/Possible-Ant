@@ -39,7 +39,7 @@ import sys
 import threading
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, render_template, request, send_from_directory, stream_with_context
+from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,7 +49,6 @@ from src.chat.db import get_chat_db
 BASE_DIR = Path(__file__).resolve().parent
 FILES_DIR = BASE_DIR / "files"
 VUE_DIR = BASE_DIR / "static-vue"
-USE_VUE = VUE_DIR.exists()
 
 _UNSAFE_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -70,11 +69,24 @@ def _safe_filename(name: str) -> str:
 
 ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf", ".docx"}
 
-app = Flask(__name__, template_folder="templates", static_folder="static")
+app = Flask(__name__, static_folder="static")
+
+# 启动时校验 RAG 配置
+try:
+    from src.rag.config import validate_rag_config
+    rag_warnings = validate_rag_config()
+    if rag_warnings:
+        import logging as _logging
+        _rag_logger = _logging.getLogger("agent.startup")
+        for w in rag_warnings:
+            _rag_logger.warning("RAG config: %s", w)
+except Exception:
+    pass
 
 _agent_instance = None
 _agent_init_lock = threading.Lock()
-_generation_lock = threading.Lock()
+_agent_instances: dict[str, "Agent"] = {}
+_agent_instances_lock = threading.Lock()
 
 
 def _json_sse(event_name: str, payload: dict) -> str:
@@ -83,7 +95,7 @@ def _json_sse(event_name: str, payload: dict) -> str:
 
 
 def get_agent() -> "Agent":
-    """获取全局 Agent 单例（双重检查锁，懒加载）"""
+    """获取全局 Agent 单例（双重检查锁，懒加载）—— 供非对话相关接口使用"""
     global _agent_instance
     if _agent_instance is None:
         with _agent_init_lock:
@@ -99,7 +111,7 @@ def get_agent() -> "Agent":
                     rag_delete_document, rag_ingest_document,
                     rag_list_documents, rag_query, read_file,
                 )
-                
+
                 tools = [
                     get_current_time, get_search_results,
                     create_file, read_file, list_files,
@@ -110,10 +122,53 @@ def get_agent() -> "Agent":
                     rag_ingest_document, rag_query,
                     rag_list_documents, rag_delete_document,
                 ]
-                
+
                 model = Model()
                 _agent_instance = Agent(model, tools)
     return _agent_instance
+
+
+def get_agent_for_conversation(conv_id: str) -> "Agent":
+    """获取按对话隔离的 Agent 实例，每个对话拥有独立记忆和流锁"""
+    with _agent_instances_lock:
+        agent = _agent_instances.get(conv_id)
+        if agent is not None:
+            return agent
+
+        from src.core.agent import Agent, Model
+        from src.core.tools import (
+            calculate, calculate_average, calculate_percentage,
+            create_file, delete_file, delete_multiple_files,
+            get_current_time, get_search_results,
+            list_files,
+            plot_bar_chart, plot_histogram, plot_line_chart,
+            plot_multi_line_chart, plot_pie_chart, plot_scatter_chart,
+            rag_delete_document, rag_ingest_document,
+            rag_list_documents, rag_query, read_file,
+        )
+
+        tools = [
+            get_current_time, get_search_results,
+            create_file, read_file, list_files,
+            delete_file, delete_multiple_files,
+            calculate, calculate_percentage, calculate_average,
+            plot_line_chart, plot_bar_chart, plot_pie_chart,
+            plot_scatter_chart, plot_histogram, plot_multi_line_chart,
+            rag_ingest_document, rag_query,
+            rag_list_documents, rag_delete_document,
+        ]
+
+        model = Model()
+        agent = Agent(model, tools)
+        agent.conv_id = conv_id
+        _agent_instances[conv_id] = agent
+        return agent
+
+
+def remove_agent_for_conversation(conv_id: str):
+    """删除对话对应的 Agent 实例，释放资源"""
+    with _agent_instances_lock:
+        _agent_instances.pop(conv_id, None)
 
 
 def _get_rag_service_safe():
@@ -129,17 +184,13 @@ def _get_rag_service_safe():
 @app.get("/")
 def chat_page():
     """聊天页面"""
-    if USE_VUE:
-        return send_from_directory(str(VUE_DIR), "index.html")
-    return render_template("chat.html")
+    return send_from_directory(str(VUE_DIR), "index.html")
 
 
 @app.get("/knowledge")
 def knowledge_page():
     """知识库管理页面"""
-    if USE_VUE:
-        return send_from_directory(str(VUE_DIR), "index.html")
-    return render_template("knowledge.html")
+    return send_from_directory(str(VUE_DIR), "index.html")
 
 
 @app.get("/assets/<path:filename>")
@@ -151,22 +202,25 @@ def vue_assets(filename: str):
 
 @app.get("/favicon.ico")
 def favicon():
-    if USE_VUE:
-        favicon_path = VUE_DIR / "favicon.ico"
-        if favicon_path.exists():
-            return send_from_directory(str(VUE_DIR), "favicon.ico")
+    favicon_path = VUE_DIR / "favicon.ico"
+    if favicon_path.exists():
+        return send_from_directory(str(VUE_DIR), "favicon.ico")
     return "", 204
 
 
 @app.get("/api/chat/state")
 def api_chat_state():
     """获取 Agent 当前状态（内存信息、是否正在生成）"""
-    agent = get_agent()
+    conv_id = request.args.get("conv_id", "").strip()
+    if conv_id:
+        agent = get_agent_for_conversation(conv_id)
+    else:
+        agent = get_agent()
     return jsonify(
         {
             "ok": True,
             "memory": agent.get_memory_status(),
-            "busy": _generation_lock.locked(),
+            "busy": agent.is_busy(),
         }
     )
 
@@ -174,10 +228,15 @@ def api_chat_state():
 @app.post("/api/chat/reset")
 def api_chat_reset():
     """重置 Agent 会话内存，生成中不允许重置"""
-    if _generation_lock.locked():
+    conv_id = (request.get_json(silent=True) or {}).get("conv_id", "").strip()
+    if conv_id:
+        agent = get_agent_for_conversation(conv_id)
+    else:
+        agent = get_agent()
+
+    if agent.is_busy():
         return jsonify({"ok": False, "message": "当前正在生成，请先停止生成"}), 409
 
-    agent = get_agent()
     agent.clear_memory()
     return jsonify({"ok": True, "message": "会话已重置"})
 
@@ -185,15 +244,21 @@ def api_chat_reset():
 @app.post("/api/chat/sync")
 def api_chat_sync():
     """同步前端对话历史到 Agent 内存，用于恢复上下文"""
-    if _generation_lock.locked():
+    body = request.get_json(silent=True) or {}
+    conv_id = str(body.get("conv_id", "")).strip()
+
+    if conv_id:
+        agent = get_agent_for_conversation(conv_id)
+    else:
+        agent = get_agent()
+
+    if agent.is_busy():
         return jsonify({"ok": False, "message": "当前正在生成，请先停止生成"}), 409
 
-    body = request.get_json(silent=True) or {}
     messages = body.get("messages", [])
     if not isinstance(messages, list):
         return jsonify({"ok": False, "message": "messages 必须是数组"}), 400
 
-    agent = get_agent()
     agent.sync_memory_from_conversation(messages)
     return jsonify({"ok": True, "memory": agent.get_memory_status()})
 
@@ -242,6 +307,7 @@ def api_activate_conversation(conv_id):
 def api_delete_conversation(conv_id):
     db = get_chat_db()
     db.delete_conversation(conv_id)
+    remove_agent_for_conversation(conv_id)
     return jsonify({"ok": True})
 
 
@@ -253,6 +319,8 @@ def api_batch_delete_conversations():
     if not isinstance(ids, list) or not ids:
         return jsonify({"ok": False, "message": "ids 必须是非空数组"}), 400
     count = db.delete_conversations_batch(ids)
+    for cid in ids:
+        remove_agent_for_conversation(cid)
     return jsonify({"ok": True, "deleted": count})
 
 
@@ -327,8 +395,8 @@ def api_update_conversation_title(conv_id):
 def api_chat_stream():
     """
     SSE 流式聊天接口（核心）。
-    
-    通过 generation_lock 保证同一时间只有一个生成任务。
+
+    每个对话使用独立的 Agent 实例和流锁，多对话可并发。
     Agent 的 React_Agent_Stream_UI 生成的事件被转换为 SSE 格式推送：
       - content:    文本增量
       - reasoning:  推理过程增量
@@ -340,17 +408,19 @@ def api_chat_stream():
     """
     body = request.get_json(silent=True) or {}
     message = str(body.get("message", "")).strip()
+    conv_id = str(body.get("conv_id", "")).strip()
     if not message:
         return jsonify({"ok": False, "message": "message 不能为空"}), 400
 
-    if not _generation_lock.acquire(blocking=False):
+    agent = get_agent_for_conversation(conv_id) if conv_id else get_agent()
+
+    if not agent.acquire_stream_lock():
         return jsonify({"ok": False, "message": "已有回复在生成，请先停止"}), 409
 
     @stream_with_context
     def event_stream():
         event_iter = None
         try:
-            agent = get_agent()
             event_iter = agent.React_Agent_Stream_UI(message)
             for event_type, data in event_iter:
                 if event_type == "content":
@@ -377,7 +447,7 @@ def api_chat_stream():
                     event_iter.close()
                 except Exception:
                     pass
-            _generation_lock.release()
+            agent.release_stream_lock()
 
     return Response(
         event_stream(),
@@ -415,7 +485,7 @@ def api_kb_upload():
     """
     上传文档到知识库。
     
-    流程：校验文件名 → 检查扩展名 → 保存到 files/ → 调用 RAG 入库
+    流程：校验文件名 → 检查扩展名 → 检查重复 → 保存到 files/ → 调用 RAG 入库
     支持格式：.txt, .md, .markdown, .pdf, .docx
     """
     service, err = _get_rag_service_safe()
@@ -438,6 +508,14 @@ def api_kb_upload():
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_UPLOAD_EXTENSIONS:
         return jsonify({"ok": False, "message": f"不支持的文件类型: {suffix}"}), 400
+
+    # 检查同名文档是否已存在
+    docs = service.list_documents()
+    if any(d.get("source") == filename for d in docs):
+        return jsonify({
+            "ok": False,
+            "message": f"文档「{filename}」已入库，如需重新入库请先删除旧文档",
+        }), 409
 
     FILES_DIR.mkdir(parents=True, exist_ok=True)
     save_path = FILES_DIR / filename

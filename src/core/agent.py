@@ -18,12 +18,13 @@ import json
 import logging
 import os
 import sys
+import threading
 import uuid
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain.chat_models import init_chat_model
-from typing import List, Callable, Dict, Optional, Tuple
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 
 sys.path.append(".")
 from src.core.tools.rag_tools import start_rag_session, end_rag_session
@@ -121,12 +122,38 @@ class Agent:
         self.max_memory = max_memory
         self.max_iterations = max_iterations
 
-        with open("src/core/prompts/React_prompt.md", "r", encoding="utf-8") as f:
+        prompt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts", "React_prompt.md")
+        with open(prompt_path, "r", encoding="utf-8") as f:
             self.system_prompt = f.read()
 
         self.llm_with_tools = self.model.llm.bind_tools(self.tools_list)
 
         self.memory = [SystemMessage(content=self.system_prompt)]
+        self._stream_lock = threading.Lock()
+        self._conv_id: Optional[str] = None
+
+    @property
+    def conv_id(self) -> Optional[str]:
+        return self._conv_id
+
+    @conv_id.setter
+    def conv_id(self, value: str):
+        self._conv_id = value
+
+    def acquire_stream_lock(self) -> bool:
+        """获取当前 Agent 的流锁，返回是否获取成功"""
+        return self._stream_lock.acquire(blocking=False)
+
+    def release_stream_lock(self):
+        """释放当前 Agent 的流锁"""
+        try:
+            self._stream_lock.release()
+        except RuntimeError:
+            pass
+
+    def is_busy(self) -> bool:
+        """当前 Agent 是否正在生成"""
+        return self._stream_lock.locked()
 
     def _trim_memory(self):
         """裁剪对话记忆：保留 SystemPrompt + 最近 (max_memory-1) 条消息"""
@@ -212,6 +239,47 @@ class Agent:
         }
 
     # ==================== 公共工具方法 ====================
+
+    @staticmethod
+    def _extract_reasoning_content(chunk) -> Optional[str]:
+        """
+        从 LLM 响应 chunk 中提取推理内容，兼容多种模型格式。
+
+        检测顺序：
+          1. chunk.reasoning_content           —— DeepSeek 官方属性
+          2. chunk.additional_kwargs["reasoning_content"]  —— LangChain 包装的 DeepSeek
+          3. chunk.response_metadata["reasoning_content"]  —— 部分 API 代理转发
+          4. chunk.additional_kwargs["reasoning"]  —— 其他推理模型
+          5. getattr(chunk, "thinking", None)      —— 部分社区推理模型
+
+        Args:
+            chunk: AIMessageChunk 或 AIMessage 实例
+
+        Returns:
+            推理文本，无推理内容时返回 None
+        """
+        val = getattr(chunk, "reasoning_content", None)
+        if val:
+            return val
+
+        for source_attr in ("additional_kwargs", "response_metadata"):
+            source = getattr(chunk, source_attr, None)
+            if isinstance(source, dict):
+                val = source.get("reasoning_content")
+                if val:
+                    return val
+
+        additional = getattr(chunk, "additional_kwargs", None)
+        if isinstance(additional, dict):
+            val = additional.get("reasoning")
+            if val:
+                return val
+
+        val = getattr(chunk, "thinking", None)
+        if val:
+            return val
+
+        return None
 
     @staticmethod
     def _extract_token_usage(chunk_or_msg) -> dict:
@@ -419,12 +487,8 @@ class Agent:
 
                 has_reasoning = False
                 for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
-                    reasoning_content = getattr(chunk, "reasoning_content", None)
-                    if not reasoning_content:
-                        additional_kwargs = getattr(chunk, "additional_kwargs", None)
-                        if additional_kwargs and isinstance(additional_kwargs, dict):
-                            reasoning_content = additional_kwargs.get("reasoning_content")
-                    
+                    reasoning_content = self._extract_reasoning_content(chunk)
+
                     if reasoning_content:
                         if not has_reasoning:
                             has_reasoning = True

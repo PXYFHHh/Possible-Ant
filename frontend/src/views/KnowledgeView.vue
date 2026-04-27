@@ -68,11 +68,22 @@
         </section>
       </div>
     </div>
+    <Transition name="modal">
+      <div v-if="confirmDelete" class="modal-overlay" @click.self="confirmDelete = null">
+        <div class="modal-box glass-card">
+          <div class="modal-text">确定要删除文档「<strong>{{ confirmDelete }}</strong>」吗？此操作不可撤销。</div>
+          <div class="modal-actions">
+            <button class="btn-ghost" @click="confirmDelete = null">取消</button>
+            <button class="btn-primary danger" @click="doDelete" style="background: var(--danger);">确认删除</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { BookOpen, Upload, FileText, BarChart3, Activity, RefreshCw } from 'lucide-vue-next'
 import { useKbStore } from '@/stores/knowledge'
 import UploadDropzone from '@/components/knowledge/UploadDropzone.vue'
@@ -80,6 +91,7 @@ import DocCard from '@/components/knowledge/DocCard.vue'
 import StatsPanel from '@/components/knowledge/StatsPanel.vue'
 
 const store = useKbStore()
+const confirmDelete = ref(null)
 
 async function handleUpload(file) {
   const jobId = await store.uploadDocument(file)
@@ -100,8 +112,16 @@ async function pollLoop(jobId) {
 }
 
 async function handleDelete(source) {
+  confirmDelete.value = source
+}
+
+async function doDelete() {
+  const source = confirmDelete.value
+  confirmDelete.value = null
+  if (!source) return
   await store.deleteDocument(source)
-  refreshAll()
+  store.loadHealth()
+  store.loadChunkStats()
 }
 
 async function refreshAll() {
@@ -241,4 +261,45 @@ onMounted(refreshAll)
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 7, 14, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.modal-box {
+  width: min(400px, 90vw);
+  padding: 24px;
+  text-align: center;
+}
+
+.modal-text {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+}
+
+.modal-text strong {
+  color: var(--text-primary);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.modal-enter-active { transition: all 0.25s ease-out; }
+.modal-leave-active { transition: all 0.15s ease-in; }
+.modal-enter-from,
+.modal-leave-to { opacity: 0; }
+.modal-enter-from .modal-box { transform: scale(0.96) translateY(8px); }
+.modal-leave-to .modal-box { transform: scale(0.96) translateY(8px); }
 </style>
