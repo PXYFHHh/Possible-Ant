@@ -92,12 +92,55 @@ class Model:
                 model=self.model_name,
                 api_key=self.api_key,
                 base_url=self.base_url,
-                timeout=60,
+                timeout=float(os.getenv("LLM_TIMEOUT", "60")),
+                max_retries=2,
                 stream_usage=True,
             )
+
+            import httpx
+            timeout_sec = float(os.getenv("LLM_READ_TIMEOUT", "600"))
+            self.llm.root_client.timeout = httpx.Timeout(
+                connect=30.0,
+                read=timeout_sec,
+                write=60.0,
+                pool=30.0,
+            )
+
+            self._ensure_reasoning_content_passthrough()
+
             logger.info("使用模型: %s", self.model_name)
         except KeyError as e:
             raise ValueError(f"缺少必要的环境变量: {e}")
+
+    @staticmethod
+    def _ensure_reasoning_content_passthrough():
+        """
+        修复 langchain-openai _convert_message_to_dict 未透传 reasoning_content 的问题。
+        
+        在 DeepSeek thinking 模式下，API 要求在后续请求的对话历史中回传
+        assistant 消息的 reasoning_content 字段，否则返回 400 错误。
+        langchain-openai 1.1.x 的 _convert_message_to_dict 只透传了
+        tool_calls / function_call / audio，未处理 reasoning_content。
+        """
+        import langchain_openai.chat_models.base as _lc_base
+
+        _original_convert = _lc_base._convert_message_to_dict
+
+        if getattr(_original_convert, "_reasoning_patched", False):
+            return
+
+        from langchain_core.messages import AIMessage
+
+        def _patched_convert(message):
+            result = _original_convert(message)
+            if isinstance(message, AIMessage):
+                reasoning = message.additional_kwargs.get("reasoning_content")
+                if reasoning:
+                    result["reasoning_content"] = reasoning
+            return result
+
+        _patched_convert._reasoning_patched = True
+        _lc_base._convert_message_to_dict = _patched_convert
 
 
 class Agent:
@@ -221,8 +264,19 @@ class Agent:
                     self.memory.append(HumanMessage(content=text))
             elif role == "assistant":
                 text = _assistant_to_text(msg)
-                if text:
-                    self.memory.append(AIMessage(content=text))
+                if not text:
+                    continue
+                reasoning_text = ""
+                segs = msg.get("segments")
+                if isinstance(segs, list):
+                    for seg in segs:
+                        if isinstance(seg, dict) and seg.get("type") == "reasoning":
+                            reasoning_text += str(seg.get("content", "")) or ""
+
+                ai_msg = AIMessage(content=text)
+                if reasoning_text:
+                    ai_msg.additional_kwargs = {"reasoning_content": reasoning_text}
+                self.memory.append(ai_msg)
 
         self._trim_memory()
 
@@ -386,19 +440,17 @@ class Agent:
         return tool_calls_dict
 
     @staticmethod
-    def _build_ai_message(full_content: str, tool_calls_dict: dict) -> AIMessage:
+    def _build_ai_message(full_content: str, tool_calls_dict: dict, full_reasoning: str = "") -> AIMessage:
         """
-        根据完整文本和工具调用字典构建 AIMessage 对象。
-
-        若存在工具调用，使用 AIMessageChunk 并附加 tool_calls 属性，
-        参数字符串通过 _safe_parse_json_args 安全解析为 dict。
+        构建 AIMessage，保留推理内容以确保 DeepSeek 思考模式不报错。
 
         Args:
-            full_content: LLM 返回的完整文本内容
-            tool_calls_dict: 由 _parse_tool_call_chunks 组装的字典
+            full_content: LLM 返回的完整文本
+            tool_calls_dict: 工具调用字典
+            full_reasoning: 本轮完整的 reasoning_content（流式期间累加）
 
         Returns:
-            AIMessage 或 AIMessageChunk 对象
+            AIMessage 对象
         """
         if tool_calls_dict:
             ai_msg = AIMessageChunk(content=full_content)
@@ -412,6 +464,11 @@ class Agent:
             ]
         else:
             ai_msg = AIMessage(content=full_content)
+
+        if full_reasoning:
+            ai_msg.additional_kwargs = getattr(ai_msg, "additional_kwargs", None) or {}
+            ai_msg.additional_kwargs["reasoning_content"] = full_reasoning
+
         return ai_msg
 
     @staticmethod
@@ -437,7 +494,7 @@ class Agent:
             return current_input + token_usage["input_tokens"], current_output + token_usage["output_tokens"]
         return current_input, current_output
 
-    def React_Agent_Stream_UI(self, user_input: str):
+    def React_Agent_Stream_UI(self, user_input: str, rag_enabled: bool = True, web_search_enabled: bool = True):
         """
         SSE 流式模式运行 Agent（供前端消费）。
 
@@ -448,19 +505,28 @@ class Agent:
           - ("tool_result", dict):   工具执行结果 {"name": str, "result": str}
           - ("token_stats", dict):   Token 消耗统计
 
-        与 React_Agent_Stream 的区别：
-          - 不直接 print，而是 yield 事件供 Flask SSE 推送
-          - 支持推理内容（reasoning_content）输出
-          - 工具调用结果也通过 yield 推送给前端
-
         Args:
             user_input: 用户输入文本
+            rag_enabled: 是否启用 RAG 知识库工具
+            web_search_enabled: 是否启用联网搜索工具
 
         Yields:
             (event_type, data) 事件元组
         """
         self.memory.append(HumanMessage(content=user_input))
         self._trim_memory()
+
+        # 按需动态绑定工具
+        RAG_TOOL_NAMES = {"rag_query", "rag_ingest_document", "rag_list_documents", "rag_delete_document"}
+        active_tools = []
+        for t in self.tools_list:
+            name = t.name if hasattr(t, "name") else getattr(t, "__name__", "")
+            if name in RAG_TOOL_NAMES and not rag_enabled:
+                continue
+            if name == "get_search_results" and not web_search_enabled:
+                continue
+            active_tools.append(t)
+        llm_with_filtered_tools = self.model.llm.bind_tools(active_tools)
 
         rag_session_id = str(uuid.uuid4())
         start_rag_session(rag_session_id)
@@ -486,7 +552,7 @@ class Agent:
                 yield ("phase", {"type": "thinking"})
 
                 has_reasoning = False
-                for chunk in self.llm_with_tools.stream(self.memory, stream_usage=True):
+                for chunk in llm_with_filtered_tools.stream(self.memory, stream_usage=True):
                     reasoning_content = self._extract_reasoning_content(chunk)
 
                     if reasoning_content:
@@ -527,7 +593,7 @@ class Agent:
                 )
 
                 tool_calls_dict = self._parse_tool_call_chunks(tool_calls_chunks)
-                ai_msg = self._build_ai_message(full_content, tool_calls_dict)
+                ai_msg = self._build_ai_message(full_content, tool_calls_dict, full_reasoning)
 
                 self.memory.append(ai_msg)
                 self._trim_memory()

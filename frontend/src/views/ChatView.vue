@@ -63,8 +63,12 @@
         <ComposerBar
           ref="composerRef"
           :generating="store.generating"
+          :rag-enabled="store.ragEnabled"
+          :web-search-enabled="store.webSearchEnabled"
           @send="store.sendMessage($event)"
           @stop="store.stopMessage()"
+          @toggle-rag="store.ragEnabled = !store.ragEnabled"
+          @toggle-web="store.webSearchEnabled = !store.webSearchEnabled"
         />
       </div>
     </div>

@@ -1,5 +1,27 @@
 <template>
   <div class="composer-bar glass">
+    <div class="composer-toolbar">
+      <button
+        class="toggle-btn"
+        :class="{ on: ragEnabled }"
+        :disabled="generating"
+        @click="$emit('toggle-rag')"
+        :title="ragEnabled ? '知识库检索已开启' : '知识库检索已关闭'"
+      >
+        <BookOpen :size="15" />
+        <span>知识库</span>
+      </button>
+      <button
+        class="toggle-btn"
+        :class="{ on: webSearchEnabled }"
+        :disabled="generating"
+        @click="$emit('toggle-web')"
+        :title="webSearchEnabled ? '联网搜索已开启' : '联网搜索已关闭'"
+      >
+        <Globe :size="15" />
+        <span>联网</span>
+      </button>
+    </div>
     <div class="composer-main">
       <textarea
         ref="inputEl"
@@ -30,13 +52,15 @@
 
 <script setup>
 import { ref, nextTick } from 'vue'
-import { Send, Square } from 'lucide-vue-next'
+import { Send, Square, BookOpen, Globe } from 'lucide-vue-next'
 
 const props = defineProps({
   generating: { type: Boolean, default: false },
+  ragEnabled: { type: Boolean, default: true },
+  webSearchEnabled: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['send', 'stop'])
+const emit = defineEmits(['send', 'stop', 'toggle-rag', 'toggle-web'])
 
 const text = ref('')
 const inputEl = ref(null)
@@ -90,11 +114,46 @@ defineExpose({ focus })
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
+.composer-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 4px 8px 2px;
+}
+
+.toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.toggle-btn:hover:not(:disabled) {
+  border-color: var(--glass-border-hover);
+  color: var(--text-secondary);
+}
+
+.toggle-btn.on {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: var(--accent);
+  color: var(--accent-light);
+}
+
+.toggle-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.toggle-btn span { font-weight: 500; }
+
 .composer-main {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 6px 8px 6px 14px;
+  padding: 4px 8px 6px 14px;
 }
 
 .composer-input {

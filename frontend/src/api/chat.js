@@ -51,10 +51,12 @@ export function parseSSEChunk(chunk) {
 }
 
 export async function streamChat(message, convId, signal, callbacks) {
+  const ragEnabled = callbacks.ragEnabled !== false
+  const webSearchEnabled = callbacks.webSearchEnabled !== false
   const response = await fetch(BASE + '/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, conv_id: convId || '' }),
+    body: JSON.stringify({ message, conv_id: convId || '', rag_enabled: ragEnabled, web_search_enabled: webSearchEnabled }),
     signal,
   })
 

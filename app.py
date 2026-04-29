@@ -409,6 +409,8 @@ def api_chat_stream():
     body = request.get_json(silent=True) or {}
     message = str(body.get("message", "")).strip()
     conv_id = str(body.get("conv_id", "")).strip()
+    rag_enabled = bool(body.get("rag_enabled", True))
+    web_search_enabled = bool(body.get("web_search_enabled", True))
     if not message:
         return jsonify({"ok": False, "message": "message 不能为空"}), 400
 
@@ -421,7 +423,7 @@ def api_chat_stream():
     def event_stream():
         event_iter = None
         try:
-            event_iter = agent.React_Agent_Stream_UI(message)
+            event_iter = agent.React_Agent_Stream_UI(message, rag_enabled, web_search_enabled)
             for event_type, data in event_iter:
                 if event_type == "content":
                     yield _json_sse("content", {"delta": data})

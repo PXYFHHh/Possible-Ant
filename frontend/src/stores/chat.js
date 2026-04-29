@@ -14,6 +14,8 @@ export const useChatStore = defineStore('chat', () => {
   const searchQuery = ref('')
   const streamingEntry = shallowRef(null)
   const liveTypingRounds = ref([])
+  const ragEnabled = ref(true)
+  const webSearchEnabled = ref(true)
 
   const activeConversation = computed(() => {
     const conv = conversations.value.find((c) => c.id === activeId.value)
@@ -287,6 +289,8 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       await streamChat(text, activeId.value, abortController.value.signal, {
+        ragEnabled: ragEnabled.value,
+        webSearchEnabled: webSearchEnabled.value,
         onContent(delta) {
           getRound().type = 'text'
           const idx = rawEntry.segments.length - 1
@@ -385,6 +389,7 @@ export const useChatStore = defineStore('chat', () => {
     conversations, activeId, generating, abortController,
     batchMode, batchSelected, searchQuery,
     streamingEntry, liveTypingRounds,
+    ragEnabled, webSearchEnabled,
     activeConversation, filteredConversations, messages,
     loadFromServer, loadMessages, switchConversation, createConversation,
     deleteConversation, batchDelete, syncAgentMemory,
